@@ -1,0 +1,188 @@
+version: '3.9'
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - events_api
+      - auth_api
+      - admin_api
+      - reports_api
+      - downtime_service
+      - frontend
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  postgres_events:
+    image: timescale/timescaledb:2.16.1-pg16
+    environment:
+      POSTGRES_USER: events
+      POSTGRES_PASSWORD: events
+      POSTGRES_DB: events
+    ports:
+      - "5433:5432"
+
+  postgres_admin:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: admin
+    ports:
+      - "5434:5432"
+
+  postgres_downtime:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: downtime
+      POSTGRES_PASSWORD: downtime
+      POSTGRES_DB: downtime
+    ports:
+      - "5435:5432"
+
+  redis_auth:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  events_api:
+    build: ./events_api
+    environment:
+      DATABASE_URL: postgresql+psycopg2://events:events@postgres_events:5432/events
+      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
+      AUTH_JWT_SECRET: devsecret
+      AUTH_DISABLED: "true"
+    depends_on:
+      - postgres_events
+      - rabbitmq
+
+  event_writer:
+    build: ./event_writer
+    environment:
+      DATABASE_URL: postgresql+psycopg2://events:events@postgres_events:5432/events
+      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      - postgres_events
+      - rabbitmq
+
+  downtime_service:
+    build: ./downtime_service
+    environment:
+      EVENTS_DB_URL: postgresql+psycopg2://events:events@postgres_events:5432/events
+      ADMIN_DB_URL: postgresql+psycopg2://admin:admin@postgres_admin:5432/admin
+      DOWNTIME_DB_URL: postgresql+psycopg2://downtime:downtime@postgres_downtime:5432/downtime
+      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
+      AUTH_JWT_SECRET: devsecret
+      AUTH_DISABLED: "true"
+    depends_on:
+      - postgres_events
+      - postgres_admin
+      - postgres_downtime
+      - rabbitmq
+
+  downtime_worker:
+    build: ./downtime_service
+    command: ["celery", "-A", "app.celery_app:celery_app", "worker", "-l", "INFO", "--concurrency=1"]
+    environment:
+      EVENTS_DB_URL: postgresql+psycopg2://events:events@postgres_events:5432/events
+      ADMIN_DB_URL: postgresql+psycopg2://admin:admin@postgres_admin:5432/admin
+      DOWNTIME_DB_URL: postgresql+psycopg2://downtime:downtime@postgres_downtime:5432/downtime
+      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
+      AUTH_JWT_SECRET: devsecret
+      AUTH_DISABLED: "true"
+    depends_on:
+      - downtime_service
+
+  availability_beat:
+    build: ./downtime_service
+    command: ["celery", "-A", "app.celery_app:celery_app", "beat", "-l", "INFO"]
+    environment:
+      EVENTS_DB_URL: postgresql+psycopg2://events:events@postgres_events:5432/events
+      ADMIN_DB_URL: postgresql+psycopg2://admin:admin@postgres_admin:5432/admin
+      DOWNTIME_DB_URL: postgresql+psycopg2://downtime:downtime@postgres_downtime:5432/downtime
+      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      - downtime_service
+
+  auth_api:
+    build: ./auth_service
+    environment:
+      AUTH_JWT_SECRET: devsecret
+      AUTH_JWT_ISSUER: asmon
+      AUTH_JWT_AUDIENCE: asmon
+      REDIS_URL: redis://redis_auth:6379/0
+    depends_on:
+      - redis_auth
+
+  reports_api:
+    build: ./reports_service
+    environment:
+      EVENTS_DB_URL: postgresql+psycopg2://events:events@postgres_events:5432/events
+      ADMIN_DB_URL: postgresql+psycopg2://admin:admin@postgres_admin:5432/admin
+      DOWNTIME_DB_URL: postgresql+psycopg2://downtime:downtime@postgres_downtime:5432/downtime
+      AUTH_JWT_SECRET: devsecret
+      AUTH_DISABLED: "true"
+    depends_on:
+      - postgres_events
+      - postgres_admin
+      - postgres_downtime
+
+  admin_api:
+    build: ./admin_service
+    environment:
+      DJANGO_SECRET_KEY: devsecret
+      DJANGO_DEBUG: "true"
+      DATABASE_URL: postgres://admin:admin@postgres_admin:5432/admin
+      EVENTS_DB_URL: postgres://events:events@postgres_events:5432/events
+      DOWNTIME_DB_URL: postgres://downtime:downtime@postgres_downtime:5432/downtime
+      AUTH_JWT_SECRET: devsecret
+      AUTH_DISABLED: "true"
+    depends_on:
+      - postgres_admin
+      - postgres_events
+      - postgres_downtime
+
+  nodered:
+    image: nodered/node-red:3.1
+    ports:
+      - "1880:1880"
+    volumes:
+      - ./nodered/flows.json:/data/flows.json:ro
+    depends_on:
+      - nginx
+      - mosquitto
+
+  simulator_service:
+    build: ./simulator_service
+    environment:
+      ADMIN_API_URL: http://nginx/api/admin/equipment/
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      POLL_INTERVAL_SEC: 3
+      REQUEST_TIMEOUT_SEC: 5
+    depends_on:
+      - nginx
+      - mosquitto
+
+  frontend:
+    build: ./frontend
+    environment:
+      VITE_API_PROXY_TARGET: http://nginx:80
+    ports:
+      - "5173:5173"
+
