@@ -33,7 +33,16 @@ async function request(path, options = {}) {
     headers: authHeaders(options.headers || {})
   })
   const text = await response.text()
-  if (!response.ok) throw new Error(text || `${response.status} ${response.statusText}`)
+  if (!response.ok) {
+    // Recover from stale/invalid token after restarts or secret changes.
+    if (response.status === 401 && getAccessToken()) {
+      clearSession()
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        window.location.replace('/login')
+      }
+    }
+    throw new Error(text || `${response.status} ${response.statusText}`)
+  }
   if (!text) return null
   try {
     return JSON.parse(text)
@@ -96,7 +105,6 @@ export const api = {
   },
   getEquipment: () => request('/api/admin/equipment/'),
   createEquipment: (payload) => request('/api/admin/equipment/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
-  patchEquipment: (id, payload) => request(`/api/admin/equipment/${encodeURIComponent(id)}/`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   deleteEquipment: (id) => request(`/api/admin/equipment/${encodeURIComponent(id)}/`, { method: 'DELETE' }),
   getEvents: (query = '') => request(`/reports/events${query}`),
   getDowntime: (query = '') => request(`/reports/downtime${query}`),
@@ -105,6 +113,11 @@ export const api = {
   getStatusDistribution: () => request('/reports/status-distribution'),
   getTimeline: (id, limit = 60) => request(`/reports/timeline/${encodeURIComponent(id)}?limit=${limit}`),
   getShiftSummary: () => request('/reports/shift-summary'),
+  getEquipmentState: () => request('/reports/equipment-state'),
+  getEquipmentLive: (onlineThresholdSec = 120) => request(`/reports/equipment-live?online_threshold_sec=${onlineThresholdSec}`),
+  getCurrentDowntime: (query = '') => request(`/reports/downtime/current${query}`),
+  createManualDowntime: (payload) => request('/reports/downtime/manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
+  resolveManualDowntime: (payload) => request('/reports/downtime/manual/resolve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   listRoles: () => request('/auth/roles'),
   createRole: (payload) => request('/auth/roles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
 }

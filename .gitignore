@@ -40,6 +40,7 @@ frontend/.vite/
 
 # Project-local tools
 .ai/
+.env
 
 # Local databases / temp
 *.sqlite3
@@ -48,3 +49,4 @@ frontend/.vite/
 # User-requested exclusions
 *.md
 *.ai
+!README.md

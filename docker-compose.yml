@@ -4,7 +4,7 @@ services:
   nginx:
     image: nginx:1.27-alpine
     ports:
-      - "8080:80"
+      - "${NGINX_PORT}:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -18,55 +18,55 @@ services:
   rabbitmq:
     image: rabbitmq:3.13-management
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "${RABBITMQ_AMQP_PORT}:5672"
+      - "${RABBITMQ_UI_PORT}:15672"
 
   mosquitto:
     image: eclipse-mosquitto:2
     ports:
-      - "1883:1883"
+      - "${MQTT_PORT}:1883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
 
   postgres_events:
     image: timescale/timescaledb:2.16.1-pg16
     environment:
-      POSTGRES_USER: events
-      POSTGRES_PASSWORD: events
-      POSTGRES_DB: events
+      POSTGRES_USER: ${POSTGRES_EVENTS_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_EVENTS_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_EVENTS_DB}
     ports:
-      - "5433:5432"
+      - "${POSTGRES_EVENTS_PORT}:5432"
 
   postgres_admin:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: admin
-      POSTGRES_DB: admin
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_ADMIN_DB}
     ports:
-      - "5434:5432"
+      - "${POSTGRES_ADMIN_PORT}:5432"
 
   postgres_downtime:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: downtime
-      POSTGRES_PASSWORD: downtime
-      POSTGRES_DB: downtime
+      POSTGRES_USER: ${POSTGRES_DOWNTIME_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_DOWNTIME_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DOWNTIME_DB}
     ports:
-      - "5435:5432"
+      - "${POSTGRES_DOWNTIME_PORT}:5432"
 
   redis_auth:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT}:6379"
 
   events_api:
     build: ./events_api
     environment:
-      DATABASE_URL: postgresql+psycopg2://events:events@postgres_events:5432/events
-      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
-      AUTH_JWT_SECRET: devsecret
-      AUTH_DISABLED: "true"
+      DATABASE_URL: ${EVENTS_API_DATABASE_URL}
+      RABBIT_URL: ${RABBIT_URL}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
+      AUTH_DISABLED: "${AUTH_DISABLED}"
     depends_on:
       - postgres_events
       - rabbitmq
@@ -74,8 +74,8 @@ services:
   event_writer:
     build: ./event_writer
     environment:
-      DATABASE_URL: postgresql+psycopg2://events:events@postgres_events:5432/events
-      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
+      DATABASE_URL: ${EVENT_WRITER_DATABASE_URL}
+      RABBIT_URL: ${RABBIT_URL}
     depends_on:
       - postgres_events
       - rabbitmq
@@ -83,12 +83,13 @@ services:
   downtime_service:
     build: ./downtime_service
     environment:
-      EVENTS_DB_URL: postgresql+psycopg2://events:events@postgres_events:5432/events
-      ADMIN_DB_URL: postgresql+psycopg2://admin:admin@postgres_admin:5432/admin
-      DOWNTIME_DB_URL: postgresql+psycopg2://downtime:downtime@postgres_downtime:5432/downtime
-      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
-      AUTH_JWT_SECRET: devsecret
-      AUTH_DISABLED: "true"
+      EVENTS_DB_URL: ${DOWNTIME_EVENTS_DB_URL}
+      ADMIN_DB_URL: ${DOWNTIME_ADMIN_DB_URL}
+      DOWNTIME_DB_URL: ${DOWNTIME_DOWNTIME_DB_URL}
+      RABBIT_URL: ${RABBIT_URL}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
+      AUTH_DISABLED: "${AUTH_DISABLED}"
+      ENABLE_OFFLINE_CHECK: "${ENABLE_OFFLINE_CHECK}"
     depends_on:
       - postgres_events
       - postgres_admin
@@ -99,12 +100,13 @@ services:
     build: ./downtime_service
     command: ["celery", "-A", "app.celery_app:celery_app", "worker", "-l", "INFO", "--concurrency=1"]
     environment:
-      EVENTS_DB_URL: postgresql+psycopg2://events:events@postgres_events:5432/events
-      ADMIN_DB_URL: postgresql+psycopg2://admin:admin@postgres_admin:5432/admin
-      DOWNTIME_DB_URL: postgresql+psycopg2://downtime:downtime@postgres_downtime:5432/downtime
-      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
-      AUTH_JWT_SECRET: devsecret
-      AUTH_DISABLED: "true"
+      EVENTS_DB_URL: ${DOWNTIME_EVENTS_DB_URL}
+      ADMIN_DB_URL: ${DOWNTIME_ADMIN_DB_URL}
+      DOWNTIME_DB_URL: ${DOWNTIME_DOWNTIME_DB_URL}
+      RABBIT_URL: ${RABBIT_URL}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
+      AUTH_DISABLED: "${AUTH_DISABLED}"
+      ENABLE_OFFLINE_CHECK: "${ENABLE_OFFLINE_CHECK}"
     depends_on:
       - downtime_service
 
@@ -112,31 +114,32 @@ services:
     build: ./downtime_service
     command: ["celery", "-A", "app.celery_app:celery_app", "beat", "-l", "INFO"]
     environment:
-      EVENTS_DB_URL: postgresql+psycopg2://events:events@postgres_events:5432/events
-      ADMIN_DB_URL: postgresql+psycopg2://admin:admin@postgres_admin:5432/admin
-      DOWNTIME_DB_URL: postgresql+psycopg2://downtime:downtime@postgres_downtime:5432/downtime
-      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
+      EVENTS_DB_URL: ${DOWNTIME_EVENTS_DB_URL}
+      ADMIN_DB_URL: ${DOWNTIME_ADMIN_DB_URL}
+      DOWNTIME_DB_URL: ${DOWNTIME_DOWNTIME_DB_URL}
+      RABBIT_URL: ${RABBIT_URL}
+      ENABLE_OFFLINE_CHECK: "${ENABLE_OFFLINE_CHECK}"
     depends_on:
       - downtime_service
 
   auth_api:
     build: ./auth_service
     environment:
-      AUTH_JWT_SECRET: devsecret
-      AUTH_JWT_ISSUER: asmon
-      AUTH_JWT_AUDIENCE: asmon
-      REDIS_URL: redis://redis_auth:6379/0
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
+      AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER}
+      AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE}
+      REDIS_URL: ${REDIS_URL}
     depends_on:
       - redis_auth
 
   reports_api:
     build: ./reports_service
     environment:
-      EVENTS_DB_URL: postgresql+psycopg2://events:events@postgres_events:5432/events
-      ADMIN_DB_URL: postgresql+psycopg2://admin:admin@postgres_admin:5432/admin
-      DOWNTIME_DB_URL: postgresql+psycopg2://downtime:downtime@postgres_downtime:5432/downtime
-      AUTH_JWT_SECRET: devsecret
-      AUTH_DISABLED: "true"
+      EVENTS_DB_URL: ${REPORTS_EVENTS_DB_URL}
+      ADMIN_DB_URL: ${REPORTS_ADMIN_DB_URL}
+      DOWNTIME_DB_URL: ${REPORTS_DOWNTIME_DB_URL}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
+      AUTH_DISABLED: "${AUTH_DISABLED}"
     depends_on:
       - postgres_events
       - postgres_admin
@@ -145,13 +148,13 @@ services:
   admin_api:
     build: ./admin_service
     environment:
-      DJANGO_SECRET_KEY: devsecret
-      DJANGO_DEBUG: "true"
-      DATABASE_URL: postgres://admin:admin@postgres_admin:5432/admin
-      EVENTS_DB_URL: postgres://events:events@postgres_events:5432/events
-      DOWNTIME_DB_URL: postgres://downtime:downtime@postgres_downtime:5432/downtime
-      AUTH_JWT_SECRET: devsecret
-      AUTH_DISABLED: "true"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY}
+      DJANGO_DEBUG: "${DJANGO_DEBUG}"
+      DATABASE_URL: ${ADMIN_DATABASE_URL}
+      EVENTS_DB_URL: ${ADMIN_EVENTS_DB_URL}
+      DOWNTIME_DB_URL: ${ADMIN_DOWNTIME_DB_URL}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
+      AUTH_DISABLED: "${AUTH_DISABLED}"
     depends_on:
       - postgres_admin
       - postgres_events
@@ -160,7 +163,7 @@ services:
   nodered:
     image: nodered/node-red:3.1
     ports:
-      - "1880:1880"
+      - "${NODERED_PORT}:1880"
     volumes:
       - ./nodered/flows.json:/data/flows.json:ro
     depends_on:
@@ -170,11 +173,11 @@ services:
   simulator_service:
     build: ./simulator_service
     environment:
-      ADMIN_API_URL: http://nginx/api/admin/equipment/
-      MQTT_HOST: mosquitto
-      MQTT_PORT: 1883
-      POLL_INTERVAL_SEC: 3
-      REQUEST_TIMEOUT_SEC: 5
+      ADMIN_API_URL: ${SIMULATOR_ADMIN_API_URL}
+      MQTT_HOST: ${SIMULATOR_MQTT_HOST}
+      MQTT_PORT: ${SIMULATOR_MQTT_PORT}
+      POLL_INTERVAL_SEC: ${SIMULATOR_POLL_INTERVAL_SEC}
+      REQUEST_TIMEOUT_SEC: ${SIMULATOR_REQUEST_TIMEOUT_SEC}
     depends_on:
       - nginx
       - mosquitto
@@ -182,7 +185,7 @@ services:
   frontend:
     build: ./frontend
     environment:
-      VITE_API_PROXY_TARGET: http://nginx:80
+      VITE_API_PROXY_TARGET: ${VITE_API_PROXY_TARGET}
     ports:
-      - "5173:5173"
+      - "${FRONTEND_PORT}:5173"
 

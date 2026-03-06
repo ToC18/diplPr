@@ -61,18 +61,19 @@ class EquipmentSerializer(serializers.ModelSerializer):
                 {"mapping": "mapping.status_map must be an object when provided"}
             )
 
-        timeout_sec = attrs.get("timeout_sec", getattr(current, "timeout_sec", 60))
-        if timeout_sec is None:
-            timeout_sec = 60
-        try:
-            timeout_sec = int(timeout_sec)
-        except (TypeError, ValueError) as exc:
-            raise serializers.ValidationError({"timeout_sec": "timeout_sec must be an integer"}) from exc
-        if timeout_sec < 60 or timeout_sec > 3600:
-            raise serializers.ValidationError(
-                {"timeout_sec": "timeout_sec must be in range 60..3600 seconds"}
-            )
-        attrs["timeout_sec"] = timeout_sec
+        if "timeout_sec" in attrs:
+            timeout_sec = attrs.get("timeout_sec")
+            if timeout_sec is None:
+                timeout_sec = 60
+            try:
+                timeout_sec = int(timeout_sec)
+            except (TypeError, ValueError) as exc:
+                raise serializers.ValidationError({"timeout_sec": "timeout_sec must be an integer"}) from exc
+            if timeout_sec < 60 or timeout_sec > 3600:
+                raise serializers.ValidationError(
+                    {"timeout_sec": "timeout_sec must be in range 60..3600 seconds"}
+                )
+            attrs["timeout_sec"] = timeout_sec
 
         return attrs
 

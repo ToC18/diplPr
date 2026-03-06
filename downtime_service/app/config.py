@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     rabbit_url: str = "amqp://guest:guest@localhost:5672/"
     auth_jwt_secret: str = "devsecret"
     auth_disabled: bool = True
+    enable_offline_check: bool = False
 
 
 settings = Settings()

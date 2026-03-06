@@ -10,14 +10,15 @@ from paho.mqtt import publish
 ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://localhost:8000/api/admin/equipment/")
 MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-POLL_INTERVAL_SEC = int(os.getenv("POLL_INTERVAL_SEC", "3"))
+POLL_INTERVAL_SEC = int(os.getenv("POLL_INTERVAL_SEC", "2"))
 REQUEST_TIMEOUT_SEC = int(os.getenv("REQUEST_TIMEOUT_SEC", "5"))
 
-PUSH_RAW_VALUES = [0, 1, 1, 1, 2]
-ALARM_MIN_SEC = 60
-ALARM_MAX_SEC = 3600
-NORMAL_MIN_SEC = 10
-NORMAL_MAX_SEC = 120
+PUSH_RAW_VALUES = [0, 1, 1, 1, 1, 1, 2]
+# Telemetry is frequent (every 2s), status transitions are less frequent.
+ALARM_MIN_SEC = 30
+ALARM_MAX_SEC = 120
+NORMAL_MIN_SEC = 40
+NORMAL_MAX_SEC = 180
 
 state_by_topic: dict[str, dict] = {}
 

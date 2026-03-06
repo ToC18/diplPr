@@ -139,7 +139,6 @@ class EquipmentAdmin(MultiDBModelAdmin):
             updated += 1
         self.message_user(request, f"Updated: {updated}", level=messages.SUCCESS)
 
-
 @admin.register(Event)
 class EventAdmin(MultiDBModelAdmin):
     using = "events"

@@ -3,7 +3,6 @@ import { Link, Navigate, NavLink, Route, Routes, useNavigate } from 'react-route
 import { api, clearSession, getAccessToken, getRefreshToken, getSessionRole, setSession } from './api'
 
 const REFRESH_MS = 15000
-const TREND_EVENTS_LIMIT = 1000
 const STATUS_COLORS = {
   RUN: '#58d39b',
   STOP: '#ff8f8f',
@@ -36,6 +35,24 @@ function durationMinutes(startTs, endTs) {
   const e = new Date(normalizeTs(endTs)).getTime()
   if (!Number.isFinite(s) || !Number.isFinite(e)) return '—'
   return `${Math.max(0, Math.round((e - s) / 60000))}м`
+}
+
+function toDayKey(ts) {
+  if (!ts) return ''
+  const d = new Date(normalizeTs(ts))
+  if (Number.isNaN(d.getTime())) return ''
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function getTodayKey() {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
 }
 
 function StatusDonut({ distribution = [] }) {
@@ -77,7 +94,11 @@ function StatusDonut({ distribution = [] }) {
 
 function DowntimeBars({ downtime = [] }) {
   const grouped = downtime.reduce((acc, row) => {
-    const mins = row.start_ts && row.end_ts ? Math.max(0, Math.round((new Date(normalizeTs(row.end_ts)) - new Date(normalizeTs(row.start_ts))) / 60000)) : 0
+    const startMs = row.start_ts ? new Date(normalizeTs(row.start_ts)).getTime() : NaN
+    const endMs = row.end_ts ? new Date(normalizeTs(row.end_ts)).getTime() : Date.now()
+    const mins = Number.isFinite(startMs) && Number.isFinite(endMs)
+      ? Math.max(0, Math.round((endMs - startMs) / 60000))
+      : 0
     acc[row.equipment_id] = (acc[row.equipment_id] || 0) + mins
     return acc
   }, {})
@@ -99,36 +120,184 @@ function DowntimeBars({ downtime = [] }) {
   )
 }
 
-function EventTrend({ events = [] }) {
-  const buckets = Array.from({ length: 10 }, (_, i) => ({ i, c: 0 }))
-  const now = Date.now()
-  const span = 10 * 60 * 1000
+function EquipmentStateTable({ rows = [] }) {
+  return (
+    <div className="chart-card">
+      <h3>Состояния оборудования (текущее)</h3>
+      <table>
+        <thead><tr><th>Оборудование</th><th>Статус</th><th>Время</th></tr></thead>
+        <tbody>
+          {rows.map((x) => (
+            <tr key={`${x.equipment_id}-${x.last_ts}`}>
+              <td>{x.equipment_id}</td>
+              <td><span className={statusTone(x.last_status)}>{x.last_status}</span></td>
+              <td>{formatTs(x.last_ts)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function CurrentDowntimeTable({ rows = [], onResolveManual = null }) {
+  const [busyId, setBusyId] = useState('')
+
+  const resolveManual = async (equipmentId) => {
+    if (!onResolveManual) return
+    setBusyId(equipmentId)
+    try {
+      await onResolveManual(equipmentId)
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  return (
+    <div className="chart-card">
+      <h3>Текущие простои</h3>
+      <table>
+        <thead><tr><th>Оборудование</th><th>Статус</th><th>Начало</th><th>Источник</th><th>Комментарий</th><th>Автор</th><th>Действие</th></tr></thead>
+        <tbody>
+          {rows.map((x) => (
+            <tr key={`${x.equipment_id}-${x.start_ts}-${x.status}`}>
+              <td>{x.equipment_id}</td>
+              <td><span className={statusTone(x.status)}>{x.status}</span></td>
+              <td>{formatTs(x.start_ts)}</td>
+              <td>{x.source || 'auto'}</td>
+              <td>{x.note || '—'}</td>
+              <td>{x.created_by || '—'}</td>
+              <td>
+                {getSessionRole() === 'admin' && x.source === 'manual'
+                  ? <button className="ghost" disabled={busyId === x.equipment_id} onClick={() => resolveManual(x.equipment_id)}>Перевести в RUN</button>
+                  : '—'}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function EquipmentLiveTable({ rows = [] }) {
+  return (
+    <div className="chart-card">
+      <h3>Живой сигнал оборудования</h3>
+      <table>
+        <thead><tr><th>Оборудование</th><th>Last seen</th><th>Возраст, сек</th><th>Состояние</th></tr></thead>
+        <tbody>
+          {rows.map((x) => (
+            <tr key={x.equipment_id}>
+              <td>{x.equipment_id}</td>
+              <td>{formatTs(x.last_seen)}</td>
+              <td>{x.age_sec ?? '—'}</td>
+              <td><span className={statusTone(x.live === 'ONLINE' ? 'RUN' : x.live === 'STALE' ? 'OFFLINE' : 'IDLE')}>{x.live}</span></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function ManualDowntimeTable({ rows = [] }) {
+  return (
+    <div className="chart-card">
+      <h3>Ручные простои (все)</h3>
+      <table>
+        <thead><tr><th>Оборудование</th><th>Статус</th><th>Начало</th><th>Конец</th><th>Длительность</th><th>Комментарий</th><th>Автор</th></tr></thead>
+        <tbody>
+          {rows.map((x) => (
+            <tr key={`${x.equipment_id}-${x.start_ts}-${x.status}-${x.created_by || ''}`}>
+              <td>{x.equipment_id}</td>
+              <td><span className={statusTone(x.status)}>{x.status}</span></td>
+              <td>{formatTs(x.start_ts)}</td>
+              <td>{formatTs(x.end_ts)}</td>
+              <td>{durationMinutes(x.start_ts, x.end_ts)}</td>
+              <td>{x.note || '—'}</td>
+              <td>{x.created_by || '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function DailyEventsBars({ events = [] }) {
+  const buckets = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    d.setDate(d.getDate() - (6 - i))
+    return {
+      key: toDayKey(d.toISOString()),
+      label: d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' }),
+      c: 0
+    }
+  })
+  const indexByKey = new Map(buckets.map((b, i) => [b.key, i]))
   events.forEach((e) => {
-    const t = new Date(normalizeTs(e.ts)).getTime()
-    if (!Number.isFinite(t) || t < now - span || t > now) return
-    const idx = Math.min(9, Math.floor(((t - (now - span)) / span) * 10))
+    const key = toDayKey(e.ts)
+    const idx = indexByKey.get(key)
+    if (idx == null) return
     buckets[idx].c += 1
   })
   const max = Math.max(1, ...buckets.map((b) => b.c))
-  const xMin = 3
-  const xMax = 97
-  const yMin = 8
-  const yMax = 96
-  const points = buckets
-    .map((b, i) => {
-      const x = xMin + (i / 9) * (xMax - xMin)
-      const y = yMax - (b.c / max) * (yMax - yMin)
-      return `${x},${y}`
-    })
-    .join(' ')
   return (
     <div className="chart-card">
-      <h3>Тренд событий (10 мин)</h3>
-      <svg viewBox="0 0 100 100" className="trend">
-        <polyline fill="none" stroke="#49c5ff" strokeWidth="2.4" points={points} />
-      </svg>
-      <div className="trend-buckets">
-        {buckets.map((b, i) => <span key={i}>{b.c}</span>)}
+      <h3>События по дням (7 дней)</h3>
+      <div className="bars">
+        {buckets.map((b) => (
+          <div key={b.key} className="bar-row">
+            <div className="bar-label">{b.label}</div>
+            <div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(4, (b.c / max) * 100)}%` }} /></div>
+            <div className="bar-val">{b.c}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function EquipmentStateCard({ equipment = [], events = [], dayKey }) {
+  const latestByEquipment = new Map()
+  events.forEach((e) => {
+    if (toDayKey(e.ts) !== dayKey) return
+    const prev = latestByEquipment.get(e.equipment_id)
+    const currTs = new Date(normalizeTs(e.ts)).getTime()
+    const prevTs = prev ? new Date(normalizeTs(prev.ts)).getTime() : -1
+    if (!prev || currTs > prevTs) latestByEquipment.set(e.equipment_id, e)
+  })
+
+  let running = 0
+  let alarm = 0
+  let stop = 0
+  let offline = 0
+  let unknown = 0
+
+  equipment.forEach((eq) => {
+    const row = latestByEquipment.get(eq.equipment_id)
+    if (!row?.status) {
+      unknown += 1
+      return
+    }
+    if (row.status === 'RUN') running += 1
+    else if (row.status === 'ALARM') alarm += 1
+    else if (row.status === 'STOP') stop += 1
+    else if (row.status === 'OFFLINE') offline += 1
+    else unknown += 1
+  })
+
+  return (
+    <div className="chart-card">
+      <h3>Состояние оборудования за день</h3>
+      <div className="legend">
+        <div><span style={{ background: STATUS_COLORS.RUN }} />RUN: {running}</div>
+        <div><span style={{ background: STATUS_COLORS.ALARM }} />ALARM: {alarm}</div>
+        <div><span style={{ background: STATUS_COLORS.STOP }} />STOP: {stop}</div>
+        <div><span style={{ background: STATUS_COLORS.OFFLINE }} />OFFLINE: {offline}</div>
+        <div><span style={{ background: '#6f8199' }} />NO DATA: {unknown}</div>
       </div>
     </div>
   )
@@ -226,6 +395,9 @@ function useDashboardData() {
   const [equipment, setEquipment] = useState([])
   const [events, setEvents] = useState([])
   const [downtime, setDowntime] = useState([])
+  const [currentDowntime, setCurrentDowntime] = useState([])
+  const [equipmentState, setEquipmentState] = useState([])
+  const [equipmentLive, setEquipmentLive] = useState([])
   const [reports, setReports] = useState([])
   const [statusDistribution, setStatusDistribution] = useState([])
   const [error, setError] = useState('')
@@ -234,19 +406,25 @@ function useDashboardData() {
     let mounted = true
     const load = async () => {
       try {
-        const [sm, eq, ev, dt, rp, sd] = await Promise.all([
+        const [sm, eq, ev, dt, rp, sd, cd, es, el] = await Promise.all([
           api.getSummary(),
           api.getEquipment(),
-          api.getEvents(`?limit=${TREND_EVENTS_LIMIT}`),
-          api.getDowntime('?limit=200'),
+          api.getEvents(),
+          api.getDowntime(),
           api.getReports(),
-          api.getStatusDistribution()
+          api.getStatusDistribution(),
+          api.getCurrentDowntime(),
+          api.getEquipmentState(),
+          api.getEquipmentLive(120)
         ])
         if (!mounted) return
         setSummary(sm)
         setEquipment(eq)
         setEvents(ev)
         setDowntime(dt)
+        setCurrentDowntime(cd)
+        setEquipmentState(es)
+        setEquipmentLive(el)
         setReports(rp)
         setStatusDistribution(sd)
         setError('')
@@ -262,32 +440,13 @@ function useDashboardData() {
     }
   }, [])
 
-  useEffect(() => {
-    let closed = false
-    const es = new EventSource(`/reports/events/stream?limit=${TREND_EVENTS_LIMIT}`)
-    es.addEventListener('events', (evt) => {
-      if (closed) return
-      try {
-        const rows = JSON.parse(evt.data)
-        if (Array.isArray(rows)) setEvents(rows)
-      } catch {
-      }
-    })
-    es.addEventListener('error', () => {
-      es.close()
-    })
-    return () => {
-      closed = true
-      es.close()
-    }
-  }, [])
-
-  return { summary, equipment, events, downtime, reports, statusDistribution, error }
+  return { summary, equipment, events, downtime, currentDowntime, equipmentState, equipmentLive, reports, statusDistribution, error }
 }
 
 function AppLayout() {
   const navigate = useNavigate()
   const data = useDashboardData()
+  const [selectedDay, setSelectedDay] = useState(getTodayKey())
 
   const alarmsCount = useMemo(() => {
     const row = (data.statusDistribution || []).find((x) => x.status === 'ALARM')
@@ -321,12 +480,18 @@ function AppLayout() {
 
       <main className="main">
         {data.error && <div className="banner error">{data.error}</div>}
+        <div className="table-card" style={{ marginBottom: 14 }}>
+          <label>
+            Дата мониторинга
+            <input type="date" value={selectedDay} onChange={(e) => setSelectedDay(e.target.value || getTodayKey())} />
+          </label>
+        </div>
         <Routes>
-          <Route path="/overview" element={<OverviewPage data={data} alarmsCount={alarmsCount} />} />
+          <Route path="/overview" element={<OverviewPage data={data} alarmsCount={alarmsCount} selectedDay={selectedDay} />} />
           <Route path="/equipment" element={<EquipmentPage data={data} />} />
-          <Route path="/events" element={<EventsPage data={data} />} />
-          <Route path="/downtime" element={<DowntimePage data={data} />} />
-          <Route path="/reports" element={<ReportsPage data={data} alarmsCount={alarmsCount} />} />
+          <Route path="/events" element={<EventsPage data={data} selectedDay={selectedDay} />} />
+          <Route path="/downtime" element={<DowntimePage data={data} selectedDay={selectedDay} />} />
+          <Route path="/reports" element={<ReportsPage data={data} alarmsCount={alarmsCount} selectedDay={selectedDay} />} />
           <Route path="/admin" element={<RoleProtected role="admin"><AdminPage /></RoleProtected>} />
           <Route path="*" element={<Navigate to="/overview" replace />} />
         </Routes>
@@ -335,19 +500,47 @@ function AppLayout() {
   )
 }
 
-function OverviewPage({ data, alarmsCount }) {
+function OverviewPage({ data, alarmsCount, selectedDay }) {
+  const dayEvents = data.events.filter((x) => toDayKey(x.ts) === selectedDay)
+  const dayDowntime = data.downtime.filter((x) => toDayKey(x.start_ts) === selectedDay || toDayKey(x.end_ts) === selectedDay)
+  const downtimeMinutes = dayDowntime.reduce((acc, row) => {
+    const s = new Date(normalizeTs(row.start_ts)).getTime()
+    const e = row.end_ts ? new Date(normalizeTs(row.end_ts)).getTime() : Date.now()
+    if (!Number.isFinite(s) || !Number.isFinite(e)) return acc
+    return acc + Math.max(0, Math.round((e - s) / 60000))
+  }, 0)
+  const alarmsToday = dayEvents.filter((x) => x.status === 'ALARM').length
+  const totalDowntimeMinutesAll = data.downtime.reduce((acc, row) => {
+    const s = new Date(normalizeTs(row.start_ts)).getTime()
+    const e = row.end_ts ? new Date(normalizeTs(row.end_ts)).getTime() : Date.now()
+    if (!Number.isFinite(s) || !Number.isFinite(e)) return acc
+    return acc + Math.max(0, Math.round((e - s) / 60000))
+  }, 0)
+
   return (
     <section className="table-card">
-      <h2>Обзор</h2>
+      <h2>{`Обзор за ${selectedDay}`}</h2>
       <div className="kpi-grid">
-        <div className="kpi-card"><div className="kpi-label">Всего событий</div><div className="kpi-value">{data.summary.total_events}</div></div>
-        <div className="kpi-card"><div className="kpi-label">Оборудование</div><div className="kpi-value">{data.summary.total_equipment}</div></div>
-        <div className="kpi-card"><div className="kpi-label">Открытые интервалы</div><div className="kpi-value">{data.summary.open_intervals}</div></div>
-        <div className="kpi-card"><div className="kpi-label">Аварии</div><div className="kpi-value">{alarmsCount}</div></div>
+        <div className="kpi-card"><div className="kpi-label">События за день</div><div className="kpi-value">{dayEvents.length}</div></div>
+        <div className="kpi-card"><div className="kpi-label">Оборудование</div><div className="kpi-value">{data.equipment.length || data.summary.total_equipment}</div></div>
+        <div className="kpi-card"><div className="kpi-label">Простой за день, мин</div><div className="kpi-value">{downtimeMinutes}</div></div>
+        <div className="kpi-card"><div className="kpi-label">Аварии за день</div><div className="kpi-value">{alarmsToday || alarmsCount}</div></div>
+        <div className="kpi-card"><div className="kpi-label">Сумма простоев (все), мин</div><div className="kpi-value">{totalDowntimeMinutesAll}</div></div>
       </div>
       <div className="charts-grid">
         <StatusDonut distribution={data.statusDistribution} />
-        <EventTrend events={data.events} />
+        <DailyEventsBars events={data.events} />
+      </div>
+      <div className="charts-grid">
+        <EquipmentStateCard equipment={data.equipment} events={data.events} dayKey={selectedDay} />
+        <DowntimeBars downtime={dayDowntime} />
+      </div>
+      <div className="charts-grid">
+        <EquipmentStateTable rows={data.equipmentState} />
+        <CurrentDowntimeTable rows={data.currentDowntime} />
+      </div>
+      <div className="charts-grid">
+        <EquipmentLiveTable rows={data.equipmentLive} />
       </div>
     </section>
   )
@@ -360,50 +553,100 @@ function EquipmentPage({ data }) {
       <table>
         <thead><tr><th>ID</th><th>Имя</th><th>Тип</th><th>Протокол</th></tr></thead>
         <tbody>
-          {data.equipment.map((x) => <tr key={x.equipment_id}><td>{x.equipment_id}</td><td>{x.name}</td><td>{x.type}</td><td>{x.protocol}</td></tr>)}
+          {data.equipment.map((x) => (
+            <tr key={x.equipment_id}>
+              <td>{x.equipment_id}</td>
+              <td>{x.name}</td>
+              <td>{x.type}</td>
+              <td>{x.protocol}</td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </section>
   )
 }
 
-function EventsPage({ data }) {
+function EventsPage({ data, selectedDay }) {
+  const dayEvents = data.events.filter((x) => toDayKey(x.ts) === selectedDay)
   return (
     <section className="table-card">
-      <h2>{`События (limit=${TREND_EVENTS_LIMIT})`}</h2>
+      <h2>{`События/интервалы за ${selectedDay}`}</h2>
       <table>
-        <thead><tr><th>Оборудование</th><th>Статус</th><th>Время</th></tr></thead>
+        <thead><tr><th>Оборудование</th><th>Статус</th><th>Начало</th><th>Конец</th><th>Простой, мин</th><th>Источник</th><th>Комментарий</th><th>Автор</th></tr></thead>
         <tbody>
-          {data.events.map((x) => <tr key={`${x.equipment_id}-${x.ts}-${x.status}`}><td>{x.equipment_id}</td><td><span className={statusTone(x.status)}>{x.status}</span></td><td>{formatTs(x.ts)}</td></tr>)}
+          {dayEvents.map((x) => <tr key={`${x.equipment_id}-${x.start_ts}-${x.status}`}><td>{x.equipment_id}</td><td><span className={statusTone(x.status)}>{x.status}</span></td><td>{formatTs(x.start_ts)}</td><td>{formatTs(x.end_ts)}</td><td>{x.downtime_minutes ?? 0}</td><td>{x.source || 'auto'}</td><td>{x.note || '—'}</td><td>{x.created_by || '—'}</td></tr>)}
         </tbody>
       </table>
     </section>
   )
 }
 
-function DowntimePage({ data }) {
+function DowntimePage({ data, selectedDay }) {
+  const dayDowntime = data.downtime.filter((x) => toDayKey(x.start_ts) === selectedDay || toDayKey(x.end_ts) === selectedDay)
+  const manualDowntime = data.downtime.filter((x) => x.source === 'manual')
+  const [forceRunId, setForceRunId] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState('')
+
+  const resolveManual = async (equipmentId) => {
+    await api.resolveManualDowntime({ equipment_id: equipmentId })
+    window.location.reload()
+  }
+  const forceRun = async () => {
+    if (!forceRunId) {
+      setActionError('Выберите оборудование')
+      return
+    }
+    setBusy(true)
+    setActionError('')
+    try {
+      await api.resolveManualDowntime({ equipment_id: forceRunId, note: 'forced RUN from downtime page' })
+      window.location.reload()
+    } catch (e) {
+      setActionError(`Ошибка: ${String(e.message || e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
   return (
     <section className="table-card">
-      <h2>Простои</h2>
-      <DowntimeBars downtime={data.downtime} />
+      <h2>{`Простои за ${selectedDay}`}</h2>
+      <div className="chart-card">
+        <h3>Принудительно перевести в RUN</h3>
+        {actionError && <div className="banner error">{actionError}</div>}
+        <div className="btn-row">
+          <select value={forceRunId} onChange={(e) => setForceRunId(e.target.value)}>
+            <option value="">Выберите оборудование</option>
+            {data.equipment.map((eq) => (
+              <option key={eq.equipment_id} value={eq.equipment_id}>{eq.equipment_id} - {eq.name}</option>
+            ))}
+          </select>
+          <button className="ghost" disabled={busy} onClick={forceRun}>{busy ? 'Выполняю...' : 'Перевести в RUN'}</button>
+        </div>
+      </div>
+      <CurrentDowntimeTable rows={data.currentDowntime} onResolveManual={resolveManual} />
+      <ManualDowntimeTable rows={manualDowntime} />
+      <DowntimeBars downtime={dayDowntime} />
       <table>
-        <thead><tr><th>Оборудование</th><th>Статус</th><th>Начало</th><th>Конец</th><th>Длительность</th></tr></thead>
+        <thead><tr><th>Оборудование</th><th>Статус</th><th>Начало</th><th>Конец</th><th>Длительность</th><th>Источник</th><th>Комментарий</th><th>Автор</th></tr></thead>
         <tbody>
-          {data.downtime.map((x) => <tr key={`${x.equipment_id}-${x.start_ts}-${x.status}`}><td>{x.equipment_id}</td><td><span className={statusTone(x.status)}>{x.status}</span></td><td>{formatTs(x.start_ts)}</td><td>{formatTs(x.end_ts)}</td><td>{durationMinutes(x.start_ts, x.end_ts)}</td></tr>)}
+          {dayDowntime.map((x) => <tr key={`${x.equipment_id}-${x.start_ts}-${x.status}`}><td>{x.equipment_id}</td><td><span className={statusTone(x.status)}>{x.status}</span></td><td>{formatTs(x.start_ts)}</td><td>{formatTs(x.end_ts)}</td><td>{durationMinutes(x.start_ts, x.end_ts)}</td><td>{x.source || 'auto'}</td><td>{x.note || '—'}</td><td>{x.created_by || '—'}</td></tr>)}
         </tbody>
       </table>
     </section>
   )
 }
 
-function ReportsPage({ data, alarmsCount }) {
+function ReportsPage({ data, alarmsCount, selectedDay }) {
+  const dayDowntime = data.downtime.filter((x) => toDayKey(x.start_ts) === selectedDay || toDayKey(x.end_ts) === selectedDay)
   return (
     <section className="table-card">
-      <h2>Отчеты</h2>
+      <h2>{`Отчеты за ${selectedDay}`}</h2>
       <p className="sub">Аварии по распределению статусов: {alarmsCount}</p>
       <div className="charts-grid">
         <StatusDonut distribution={data.statusDistribution} />
-        <DowntimeBars downtime={data.downtime} />
+        <DowntimeBars downtime={dayDowntime} />
       </div>
       <div className="grid-cards">
         {data.reports.map((x) => (
@@ -420,6 +663,7 @@ function ReportsPage({ data, alarmsCount }) {
 function AdminPage() {
   const [users, setUsers] = useState([])
   const [roles, setRoles] = useState([])
+  const [equipmentList, setEquipmentList] = useState([])
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [roleForm, setRoleForm] = useState({ name: '', description: '' })
@@ -434,12 +678,20 @@ function AdminPage() {
     poll_interval_sec: 2,
     timeout_sec: 60
   })
+  const [manualDowntimeForm, setManualDowntimeForm] = useState({
+    equipment_id: '',
+    status: 'STOP',
+    start_ts: '',
+    end_ts: '',
+    note: ''
+  })
 
   const loadAdminData = async () => {
     try {
-      const [u, r] = await Promise.all([api.listUsers(), api.listRoles()])
+      const [u, r, eq] = await Promise.all([api.listUsers(), api.listRoles(), api.getEquipment()])
       setUsers(Array.isArray(u) ? u : [])
       setRoles(Array.isArray(r) ? r : [])
+      setEquipmentList(Array.isArray(eq) ? eq : [])
       setError('')
     } catch (e) {
       setError(`Ошибка загрузки админ-данных: ${String(e.message || e)}`)
@@ -495,6 +747,28 @@ function AdminPage() {
     }
   }
 
+  const createManualDowntime = async (e) => {
+    e.preventDefault()
+    if (!manualDowntimeForm.equipment_id) {
+      setError('Выберите оборудование для ручного простоя')
+      return
+    }
+    try {
+      const payload = {
+        equipment_id: manualDowntimeForm.equipment_id.trim(),
+        status: manualDowntimeForm.status,
+        start_ts: manualDowntimeForm.start_ts,
+        end_ts: manualDowntimeForm.end_ts || null,
+        note: manualDowntimeForm.note.trim() || null
+      }
+      await api.createManualDowntime(payload)
+      setNotice(`Ручной простой добавлен: ${payload.equipment_id}`)
+      setManualDowntimeForm({ equipment_id: '', status: 'STOP', start_ts: '', end_ts: '', note: '' })
+    } catch (err) {
+      setError(`Ошибка добавления простоя: ${String(err.message || err)}`)
+    }
+  }
+
   return (
     <section className="table-card">
       <h2>Администрирование</h2>
@@ -523,6 +797,7 @@ function AdminPage() {
               </select>
             </label>
           )}
+          {equipmentForm.type === 'push' && <div className="sub">Для `push` протокол фиксированный: mqtt.</div>}
           <label>Host<input value={equipmentForm.endpoint_host} onChange={(e) => setEquipmentForm({ ...equipmentForm, endpoint_host: e.target.value })} /></label>
           <label>Port<input type="number" value={equipmentForm.endpoint_port} onChange={(e) => setEquipmentForm({ ...equipmentForm, endpoint_port: Number(e.target.value) })} /></label>
           {equipmentForm.type === 'push' && <label>Topic<input value={equipmentForm.endpoint_topic} onChange={(e) => setEquipmentForm({ ...equipmentForm, endpoint_topic: e.target.value })} /></label>}
@@ -537,6 +812,34 @@ function AdminPage() {
           <label>Описание<input value={roleForm.description} onChange={(e) => setRoleForm({ ...roleForm, description: e.target.value })} /></label>
           <button className="primary" type="submit">Создать роль</button>
           <div className="sub" style={{ marginTop: 8 }}>Роли: {roles.map((r) => r.name).join(', ') || '—'}</div>
+        </form>
+      </div>
+
+      <div className="charts-grid" style={{ marginTop: 14 }}>
+        <form className="chart-card" onSubmit={createManualDowntime}>
+          <h3>Ручной простой (admin)</h3>
+          <label>Оборудование
+            <select value={manualDowntimeForm.equipment_id} onChange={(e) => setManualDowntimeForm({ ...manualDowntimeForm, equipment_id: e.target.value })}>
+              <option value="">Выберите оборудование</option>
+              {equipmentList.map((eq) => (
+                <option key={eq.equipment_id} value={eq.equipment_id}>
+                  {eq.equipment_id} - {eq.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>Статус
+            <select value={manualDowntimeForm.status} onChange={(e) => setManualDowntimeForm({ ...manualDowntimeForm, status: e.target.value })}>
+              <option value="STOP">STOP</option>
+              <option value="ALARM">ALARM</option>
+              <option value="OFFLINE">OFFLINE</option>
+              <option value="IDLE">IDLE</option>
+            </select>
+          </label>
+          <label>Начало<input type="datetime-local" value={manualDowntimeForm.start_ts} onChange={(e) => setManualDowntimeForm({ ...manualDowntimeForm, start_ts: e.target.value })} /></label>
+          <label>Конец (опционально)<input type="datetime-local" value={manualDowntimeForm.end_ts} onChange={(e) => setManualDowntimeForm({ ...manualDowntimeForm, end_ts: e.target.value })} /></label>
+          <label>Комментарий<input value={manualDowntimeForm.note} onChange={(e) => setManualDowntimeForm({ ...manualDowntimeForm, note: e.target.value })} /></label>
+          <button className="primary" type="submit">Добавить простой</button>
         </form>
       </div>
 
