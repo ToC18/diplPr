@@ -10,16 +10,27 @@ export function getSessionRole() {
   return localStorage.getItem('asmon_role') || ''
 }
 
-export function setSession(accessToken, refreshToken, role = '') {
+export function getSessionPermissions() {
+  const raw = localStorage.getItem('asmon_permissions') || '[]'
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return []
+  }
+}
+
+export function setSession(accessToken, refreshToken, role = '', permissions = []) {
   localStorage.setItem('asmon_access_token', accessToken || '')
   localStorage.setItem('asmon_refresh_token', refreshToken || '')
   localStorage.setItem('asmon_role', role || '')
+  localStorage.setItem('asmon_permissions', JSON.stringify(Array.isArray(permissions) ? permissions : []))
 }
 
 export function clearSession() {
   localStorage.removeItem('asmon_access_token')
   localStorage.removeItem('asmon_refresh_token')
   localStorage.removeItem('asmon_role')
+  localStorage.removeItem('asmon_permissions')
 }
 
 export function authHeaders(extra = {}) {
@@ -92,6 +103,8 @@ export const api = {
   listUsers() {
     return request('/auth/users')
   },
+  createUser: (payload) => request('/auth/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
+  deleteUser: (username) => request(`/auth/users/${encodeURIComponent(username)}`, { method: 'DELETE' }),
   logout(payload) {
     return fetch('/auth/logout', {
       method: 'POST',
@@ -106,6 +119,7 @@ export const api = {
   getEquipment: () => request('/api/admin/equipment/'),
   createEquipment: (payload) => request('/api/admin/equipment/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   deleteEquipment: (id) => request(`/api/admin/equipment/${encodeURIComponent(id)}/`, { method: 'DELETE' }),
+  telegramNotify: (payload) => request('/api/admin/telegram/notify/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   getEvents: (query = '') => request(`/reports/events${query}`),
   getDowntime: (query = '') => request(`/reports/downtime${query}`),
   getSummary: () => request('/reports/summary'),
@@ -119,5 +133,8 @@ export const api = {
   createManualDowntime: (payload) => request('/reports/downtime/manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   resolveManualDowntime: (payload) => request('/reports/downtime/manual/resolve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
   listRoles: () => request('/auth/roles'),
-  createRole: (payload) => request('/auth/roles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+  createRole: (payload) => request('/auth/roles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
+  updateRole: (roleName, payload) => request(`/auth/roles/${encodeURIComponent(roleName)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
+  deleteRole: (roleName) => request(`/auth/roles/${encodeURIComponent(roleName)}`, { method: 'DELETE' }),
+  getPermissions: () => request('/auth/permissions')
 }

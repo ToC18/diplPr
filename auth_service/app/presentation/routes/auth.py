@@ -3,7 +3,7 @@ from datetime import datetime
 from fastapi import APIRouter, Header
 
 from ...application.services import auth_service
-from ...domain.schemas import LoginIn, LogoutIn, RefreshIn, RegisterIn, RoleIn
+from ...domain.schemas import LoginIn, LogoutIn, RefreshIn, RegisterIn, RoleIn, RoleUpdateIn, UserCreateIn
 
 router = APIRouter()
 
@@ -19,7 +19,8 @@ def login(data: LoginIn):
 
 
 @router.post("/auth/register")
-def register(data: RegisterIn):
+def register(data: RegisterIn, authorization: str | None = Header(default=None)):
+    auth_service.require_permission(authorization, "users.manage")
     return auth_service.register(data.username, data.password, data.role)
 
 
@@ -44,8 +45,20 @@ def list_roles():
 
 
 @router.post("/auth/roles")
-def create_role(data: RoleIn):
-    return auth_service.create_role(data.name, data.description)
+def create_role(data: RoleIn, authorization: str | None = Header(default=None)):
+    auth_service.require_permission(authorization, "roles.manage")
+    return auth_service.create_role(data.name, data.description, data.permissions)
+
+
+@router.put("/auth/roles/{role_name}")
+def update_role(role_name: str, data: RoleUpdateIn, authorization: str | None = Header(default=None)):
+    auth_service.require_permission(authorization, "roles.manage")
+    return auth_service.update_role(role_name, data.description, data.permissions)
+
+
+@router.get("/auth/permissions")
+def permissions_catalog():
+    return auth_service.permission_catalog()
 
 
 @router.get("/auth/me")
@@ -56,6 +69,21 @@ def me(authorization: str | None = Header(default=None)):
 @router.get("/auth/users")
 def users(authorization: str | None = Header(default=None)):
     return auth_service.list_users_for_admin(authorization)
+
+
+@router.post("/auth/users")
+def create_user(data: UserCreateIn, authorization: str | None = Header(default=None)):
+    return auth_service.create_user_for_admin(authorization, data.username, data.password, data.role)
+
+
+@router.delete("/auth/users/{username}")
+def delete_user(username: str, authorization: str | None = Header(default=None)):
+    return auth_service.delete_user_for_admin(authorization, username)
+
+
+@router.delete("/auth/roles/{role_name}")
+def delete_role(role_name: str, authorization: str | None = Header(default=None)):
+    return auth_service.delete_role(role_name, authorization)
 
 
 @router.get("/health")

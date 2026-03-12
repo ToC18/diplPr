@@ -80,6 +80,17 @@ services:
       - postgres_events
       - rabbitmq
 
+  telegram_notifier:
+    build: ./telegram_notifier
+    environment:
+      RABBIT_URL: ${RABBIT_URL}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      TELEGRAM_ALERT_STATUSES: ${TELEGRAM_ALERT_STATUSES}
+      TELEGRAM_QUEUE_NAME: ${TELEGRAM_QUEUE_NAME}
+    depends_on:
+      - rabbitmq
+
   downtime_service:
     build: ./downtime_service
     environment:
@@ -155,6 +166,8 @@ services:
       DOWNTIME_DB_URL: ${ADMIN_DOWNTIME_DB_URL}
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
       AUTH_DISABLED: "${AUTH_DISABLED}"
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
     depends_on:
       - postgres_admin
       - postgres_events

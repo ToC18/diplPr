@@ -8,13 +8,12 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
-    allowedHosts: ['frontend', 'localhost'],
+    allowedHosts: ['frontend', 'localhost', 'nginx'],
     proxy: {
-      '/reports': backendTarget,
-      '/admin': backendTarget,
-      '/api': backendTarget,
-      '/events': backendTarget,
-      '/auth': backendTarget
+      '/reports/': backendTarget,
+      '/admin/': backendTarget,
+      '/api/': backendTarget,
+      '/auth/': backendTarget
     }
   }
 })

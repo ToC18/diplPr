@@ -89,3 +89,8 @@ class EquipmentSerializer(serializers.ModelSerializer):
             "timeout_sec",
             "mapping",
         ]
+
+
+class TelegramNotifySerializer(serializers.Serializer):
+    message = serializers.CharField(max_length=4000)
+    equipment_id = serializers.CharField(required=False, allow_blank=True, max_length=128)

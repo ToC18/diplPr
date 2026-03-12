@@ -17,9 +17,21 @@ class LogoutIn(BaseModel):
 class RoleIn(BaseModel):
     name: str
     description: str | None = None
+    permissions: list[str] = []
+
+
+class RoleUpdateIn(BaseModel):
+    description: str | None = None
+    permissions: list[str] = []
 
 
 class RegisterIn(BaseModel):
+    username: str
+    password: str
+    role: str = "operator"
+
+
+class UserCreateIn(BaseModel):
     username: str
     password: str
     role: str = "operator"
