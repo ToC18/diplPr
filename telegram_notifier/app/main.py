@@ -1,6 +1,7 @@
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pika
 import requests
@@ -9,6 +10,8 @@ from .config import settings
 
 
 last_status_by_equipment: dict[str, str] = {}
+MINSK_TZ = ZoneInfo("Europe/Minsk")
+MINSK_FALLBACK_TZ = timezone(timedelta(hours=3))
 
 
 def send_telegram_message(text: str) -> None:
@@ -17,14 +20,19 @@ def send_telegram_message(text: str) -> None:
         return
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
     payload = {"chat_id": settings.telegram_chat_id, "text": text}
-    r = requests.post(url, json=payload, timeout=10)
-    r.raise_for_status()
+    response = requests.post(url, json=payload, timeout=10)
+    response.raise_for_status()
 
 
 def format_message(equipment_id: str, status: str, ts_raw: str) -> str:
     try:
         ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-        ts_text = ts.strftime("%Y-%m-%d %H:%M:%S")
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        try:
+            ts_text = ts.astimezone(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            ts_text = ts.astimezone(MINSK_FALLBACK_TZ).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         ts_text = str(ts_raw)
     return (
@@ -49,10 +57,9 @@ def handle_message(ch, method, properties, body) -> None:
         prev = last_status_by_equipment.get(equipment_id)
         last_status_by_equipment[equipment_id] = status
 
-        # Отправляем только при переходе в аварийный статус.
         if status in settings.alert_statuses and prev != status:
-            msg = format_message(equipment_id, status, ts_raw)
-            send_telegram_message(msg)
+            message = format_message(equipment_id, status, ts_raw)
+            send_telegram_message(message)
             print(f"telegram_notifier: alert sent for {equipment_id} status={status}")
     except Exception as exc:
         print(f"telegram_notifier: handle error: {exc}")

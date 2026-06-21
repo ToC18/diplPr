@@ -29,9 +29,11 @@ class RegisterIn(BaseModel):
     username: str
     password: str
     role: str = "operator"
+    full_name: str | None = None
 
 
 class UserCreateIn(BaseModel):
     username: str
     password: str
     role: str = "operator"
+    full_name: str | None = None

@@ -1,10 +1,13 @@
 import os
 
 import requests
+from django.db import connections
+from django.http import JsonResponse
 from rest_framework import status, viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .auth import EquipmentApiPermission, TelegramNotifyPermission
 from .models import Equipment
 from .serializers import EquipmentSerializer, TelegramNotifySerializer
 
@@ -13,9 +16,28 @@ class EquipmentViewSet(viewsets.ModelViewSet):
     queryset = Equipment.objects.all().order_by("equipment_id")
     serializer_class = EquipmentSerializer
     lookup_field = "equipment_id"
+    permission_classes = [EquipmentApiPermission]
+
+
+def health(request):
+    checks = {}
+    ok = True
+    for alias in ("default", "events", "downtime"):
+        try:
+            with connections[alias].cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            checks[alias] = "ok"
+        except Exception as exc:
+            ok = False
+            checks[alias] = str(exc)
+    status_code = 200 if ok else 503
+    return JsonResponse({"status": "ok" if ok else "error", "checks": checks}, status=status_code)
 
 
 class TelegramNotifyView(APIView):
+    permission_classes = [TelegramNotifyPermission]
+
     def post(self, request):
         serializer = TelegramNotifySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)

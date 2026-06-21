@@ -1,6 +1,7 @@
-﻿# OS
+# OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # IDE
 .idea/
@@ -37,16 +38,53 @@ dist/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+node_modules/
+dist/
 
-# Project-local tools
+# Project-local tools and secrets
 .ai/
 .env
+.env.*
+!.env.example
 
 # Local databases / temp
 *.sqlite3
 *.db
+*.dump
+*.bak
+*.bkp
+tmp/
+temp/
+.tmp*/
+tmp_*
+~$*
+.$*
 
-# User-requested exclusions
+# Documentation and local diploma materials
 *.md
-*.ai
-!README.md
+*.doc
+*.docx
+*.pdf
+*.vsdx
+*.drawio
+*.puml
+*.txt
+*.png
+*.jpg
+*.jpeg
+*.jfif
+*.gif
+*.zip
+docs/
+docx_media/
+generated_diagrams/
+_doc_review/
+
+# One-off local scripts and generated helpers
+/tools/
+/*.py
+/*.sql
+
+# Keep project test entrypoints if they are intentionally added later
+!requirements-test.txt
+!Dockerfile.test

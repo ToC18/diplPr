@@ -28,6 +28,21 @@ PERMISSION_LABELS = {
     "equipment.manage": "Управление оборудованием",
 }
 
+BUILTIN_ROLES = {
+    "admin": {
+        "description": "Full access",
+        "permissions": ["*"],
+    },
+    "operator": {
+        "description": "Live monitoring access",
+        "permissions": ["dashboard.view", "events.view", "downtime.view"],
+    },
+    "manager": {
+        "description": "Monitoring and reporting access",
+        "permissions": ["dashboard.view", "events.view", "downtime.view", "reports.view"],
+    },
+}
+
 
 def _normalize_permissions(raw: str | list[str] | None) -> list[str]:
     if raw is None:
@@ -116,49 +131,37 @@ def _get_user(username: str) -> dict:
     return redis_client.hgetall(_user_key(username))
 
 
-def _save_user(username: str, password: str, role: str) -> None:
+def _save_user(username: str, password: str, role: str, full_name: str = "") -> None:
     redis_client.hset(
         _user_key(username),
         mapping={
             "username": username.strip().lower(),
             "password_hash": _password_hash(password),
             "role": role,
+            "full_name": full_name or username,
             "created_at": datetime.utcnow().isoformat(),
         },
     )
 
 
 def ensure_default_roles() -> None:
-    if redis_client.scard("roles") == 0:
-        redis_client.sadd("roles", "admin", "operator")
+    for role_name, role_data in BUILTIN_ROLES.items():
+        redis_client.sadd("roles", role_name)
         redis_client.hset(
-            "role:admin",
+            _role_key(role_name),
             mapping={
-                "name": "admin",
-                "description": "Full access",
-                "permissions": "*",
+                "name": role_name,
+                "description": role_data["description"],
+                "permissions": _permissions_to_str(role_data["permissions"]),
             },
         )
-        redis_client.hset(
-            "role:operator",
-            mapping={
-                "name": "operator",
-                "description": "Dashboard access",
-                "permissions": _permissions_to_str(
-                    ["dashboard.view", "events.view", "downtime.view", "reports.view"]
-                ),
-            },
-        )
-    else:
-        for name in redis_client.smembers("roles"):
-            role_key = _role_key(name)
-            if not redis_client.hget(role_key, "permissions"):
-                default_permissions = "*" if name == "admin" else _permissions_to_str(
-                    ["dashboard.view", "events.view", "downtime.view", "reports.view"]
-                )
-                redis_client.hset(role_key, "permissions", default_permissions)
     if not _get_user("admin"):
-        _save_user("admin", "admin", "admin")
+        _save_user("admin", "admin", "admin", full_name="Администратор Системы")
+    else:
+        # Update full_name if it was missing
+        user = _get_user("admin")
+        if not user.get("full_name"):
+            redis_client.hset(_user_key("admin"), "full_name", "Администратор Системы")
 
 
 def login(username: str, password: str) -> dict:
@@ -176,10 +179,11 @@ def login(username: str, password: str) -> dict:
         "token_type": "bearer",
         "role": role,
         "permissions": permissions,
+        "full_name": user.get("full_name", username),
     }
 
 
-def register(username: str, password: str, role: str = "operator") -> dict:
+def register(username: str, password: str, role: str = "operator", full_name: str = "") -> dict:
     normalized = username.strip().lower()
     if len(normalized) < 3:
         raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
@@ -189,7 +193,7 @@ def register(username: str, password: str, role: str = "operator") -> dict:
         raise HTTPException(status_code=409, detail="User already exists")
     if role not in redis_client.smembers("roles"):
         raise HTTPException(status_code=400, detail="Unknown role")
-    _save_user(normalized, password, role)
+    _save_user(normalized, password, role, full_name=full_name)
     return {"status": "ok", "username": normalized, "role": role}
 
 
@@ -204,11 +208,17 @@ def verify(token: str) -> dict:
         )
     except Exception as exc:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
+
+    username = payload.get("sub")
+    user = _get_user(username) if username else {}
+
     return {
         "valid": True,
-        "sub": payload.get("sub"),
+        "sub": username,
+        "username": username,
         "role": payload.get("role"),
         "permissions": _normalize_permissions(payload.get("permissions", [])),
+        "full_name": user.get("full_name") or username,
     }
 
 
@@ -232,6 +242,7 @@ def list_users_for_admin(authorization: str | None) -> list[dict]:
         users.append(
             {
                 "username": row.get("username", key.replace("user:", "")),
+                "full_name": row.get("full_name", ""),
                 "role": row.get("role", "operator"),
                 "created_at": row.get("created_at", ""),
             }
@@ -309,10 +320,8 @@ def create_role(name: str, description: str | None, permissions: list[str] | Non
 
 def update_role(role_name: str, description: str | None, permissions: list[str] | None = None) -> dict:
     normalized_role = role_name.strip().lower()
-    if normalized_role == "admin":
-        raise HTTPException(status_code=400, detail="Built-in role 'admin' cannot be changed")
-    if normalized_role == "operator":
-        raise HTTPException(status_code=400, detail="Built-in role 'operator' cannot be changed")
+    if normalized_role in BUILTIN_ROLES:
+        raise HTTPException(status_code=400, detail=f"Built-in role '{normalized_role}' cannot be changed")
     if normalized_role not in redis_client.smembers("roles"):
         raise HTTPException(status_code=404, detail="Role not found")
     normalized_permissions = _normalize_permissions(permissions or [])
@@ -330,11 +339,11 @@ def update_role(role_name: str, description: str | None, permissions: list[str] 
     return {"status": "ok", "name": normalized_role, "permissions": normalized_permissions}
 
 
-def create_user_for_admin(authorization: str | None, username: str, password: str, role: str = "operator") -> dict:
+def create_user_for_admin(authorization: str | None, username: str, password: str, role: str = "operator", full_name: str = "") -> dict:
     actor = me_from_bearer(authorization)
     if not _has_permission(actor, "users.manage"):
         raise HTTPException(status_code=403, detail="Permission users.manage required")
-    return register(username, password, role)
+    return register(username, password, role, full_name=full_name)
 
 
 def delete_user_for_admin(authorization: str | None, username: str) -> dict:
@@ -356,7 +365,7 @@ def delete_role(role_name: str, authorization: str | None) -> dict:
     if not _has_permission(actor, "roles.manage"):
         raise HTTPException(status_code=403, detail="Permission roles.manage required")
     normalized_role = role_name.strip().lower()
-    if normalized_role in {"admin", "operator"}:
+    if normalized_role in BUILTIN_ROLES:
         raise HTTPException(status_code=400, detail="Built-in roles cannot be deleted")
     if normalized_role not in redis_client.smembers("roles"):
         raise HTTPException(status_code=404, detail="Role not found")

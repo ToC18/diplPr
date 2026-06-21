@@ -12,7 +12,7 @@ def handle_event(ch, method, properties, body):
 def run_consumer() -> None:
     connection = pika.BlockingConnection(pika.URLParameters(settings.rabbit_url))
     channel = connection.channel()
-    channel.queue_declare(queue="equipment_events", durable=True)
+    channel.queue_declare(queue=settings.queue_name, durable=True)
     channel.basic_qos(prefetch_count=50)
-    channel.basic_consume(queue="equipment_events", on_message_callback=handle_event)
+    channel.basic_consume(queue=settings.queue_name, on_message_callback=handle_event)
     channel.start_consuming()

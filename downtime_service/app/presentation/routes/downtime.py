@@ -1,8 +1,10 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import text
 
 from ...application.services import downtime_service
+from ...database import engine_admin, engine_downtime, engine_events
 from ..dependencies.auth import verify_token
 
 router = APIRouter()
@@ -24,5 +26,11 @@ def equipment_state(equipment_id: str, _=Depends(verify_token)):
 
 
 @router.get("/health")
-def health(_=Depends(verify_token)):
+def health():
+    with engine_events.begin() as conn:
+        conn.execute(text("SELECT 1"))
+    with engine_admin.begin() as conn:
+        conn.execute(text("SELECT 1"))
+    with engine_downtime.begin() as conn:
+        conn.execute(text("SELECT 1"))
     return {"status": "ok", "ts": datetime.utcnow().isoformat()}

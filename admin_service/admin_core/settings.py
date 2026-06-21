@@ -5,6 +5,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "devsecret")
 DEBUG = os.getenv("DJANGO_DEBUG", "true").lower() == "true"
+AUTH_DISABLED = os.getenv("AUTH_DISABLED", "false").lower() == "true"
+AUTH_JWT_SECRET = os.getenv("AUTH_JWT_SECRET", "secret")
 ALLOWED_HOSTS = ["*"]
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:8080",

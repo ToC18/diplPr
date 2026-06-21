@@ -1,73 +1,164 @@
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 from sqlalchemy import text
 
 from .celery_app import celery_app
 from .config import settings
 from .database import engine_admin, engine_downtime, engine_events
+from .schema import ensure_runtime_schema
+
+
+def split_interval_by_day(start_ts: datetime, end_ts: datetime) -> list[tuple[datetime, datetime]]:
+    if end_ts <= start_ts:
+        return [(start_ts, start_ts)]
+
+    segments: list[tuple[datetime, datetime]] = []
+    cursor = start_ts
+    while cursor.date() < end_ts.date():
+        next_midnight = datetime.combine(cursor.date() + timedelta(days=1), time.min)
+        day_end = next_midnight - timedelta(microseconds=1)
+        segments.append((cursor, day_end))
+        cursor = next_midnight
+    segments.append((cursor, end_ts))
+    return segments
+
+
+def plan_gap_transition(
+    last_status: str | None,
+    last_ts: datetime | None,
+    next_ts: datetime,
+    timeout_sec: int,
+) -> dict[str, datetime] | None:
+    if not last_status or last_ts is None:
+        return None
+
+    offline_start = last_ts + timedelta(seconds=max(1, int(timeout_sec)))
+    if next_ts <= offline_start:
+        return None
+
+    return {
+        "close_previous_at": offline_start,
+        "offline_start": offline_start,
+        "offline_end": next_ts,
+    }
+
+
+def _load_timeout_map() -> dict[str, int]:
+    with engine_admin.begin() as admin_conn:
+        rows = admin_conn.execute(
+            text("SELECT equipment_id, COALESCE(timeout_sec, 60) FROM admin_app_equipment")
+        )
+        return {equipment_id: int(timeout_sec) for equipment_id, timeout_sec in rows}
+
+
+def _upsert_equipment_state(dt_conn, equipment_id: str, status: str, ts: datetime) -> None:
+    dt_conn.execute(
+        text(
+            """
+            INSERT INTO equipment_state (equipment_id, last_status, last_ts)
+            VALUES (:eid, :st, :ts)
+            ON CONFLICT (equipment_id)
+            DO UPDATE SET last_status = EXCLUDED.last_status, last_ts = EXCLUDED.last_ts
+            """
+        ),
+        {"eid": equipment_id, "st": status, "ts": ts},
+    )
+
+
+def _insert_interval(
+    dt_conn,
+    equipment_id: str,
+    status: str,
+    start_ts: datetime,
+    end_ts: datetime | None,
+    source: str = "auto",
+    note: str | None = None,
+    created_by: str | None = None,
+) -> None:
+    dt_conn.execute(
+        text(
+            """
+            INSERT INTO downtime_intervals (equipment_id, status, start_ts, end_ts, source, note, created_by)
+            VALUES (:eid, :st, :start_ts, :end_ts, :source, :note, :created_by)
+            """
+        ),
+        {
+            "eid": equipment_id,
+            "st": status,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "source": source,
+            "note": note,
+            "created_by": created_by,
+        },
+    )
+
+
+def _insert_closed_interval_segments(
+    dt_conn,
+    equipment_id: str,
+    status: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    source: str = "auto",
+    note: str | None = None,
+    created_by: str | None = None,
+) -> None:
+    for segment_start, segment_end in split_interval_by_day(start_ts, end_ts):
+        _insert_interval(
+            dt_conn,
+            equipment_id=equipment_id,
+            status=status,
+            start_ts=segment_start,
+            end_ts=segment_end,
+            source=source,
+            note=note,
+            created_by=created_by,
+        )
+
+
+def _close_open_interval(dt_conn, equipment_id: str, close_ts: datetime) -> None:
+    open_interval = dt_conn.execute(
+        text(
+            """
+            SELECT id, equipment_id, status, start_ts, source, note, created_by
+            FROM downtime_intervals
+            WHERE equipment_id = :eid AND end_ts IS NULL
+            ORDER BY start_ts DESC
+            LIMIT 1
+            """
+        ),
+        {"eid": equipment_id},
+    ).mappings().fetchone()
+
+    if open_interval is None:
+        return
+
+    safe_close_ts = max(close_ts, open_interval["start_ts"])
+    segments = split_interval_by_day(open_interval["start_ts"], safe_close_ts)
+    first_start, first_end = segments[0]
+    dt_conn.execute(
+        text("UPDATE downtime_intervals SET start_ts = :start_ts, end_ts = :end_ts WHERE id = :id"),
+        {"id": open_interval["id"], "start_ts": first_start, "end_ts": first_end},
+    )
+
+    for segment_start, segment_end in segments[1:]:
+        _insert_interval(
+            dt_conn,
+            equipment_id=open_interval["equipment_id"],
+            status=open_interval["status"],
+            start_ts=segment_start,
+            end_ts=segment_end,
+            source=open_interval["source"],
+            note=open_interval["note"],
+            created_by=open_interval["created_by"],
+        )
 
 
 @celery_app.task(name="app.tasks.process_events")
 def process_events():
+    ensure_runtime_schema()
     with engine_downtime.begin() as dt_conn:
-        dt_conn.exec_driver_sql(
-            """
-            CREATE TABLE IF NOT EXISTS equipment_state (
-                id SERIAL PRIMARY KEY,
-                equipment_id VARCHAR(64) UNIQUE NOT NULL,
-                last_status VARCHAR(32) NOT NULL,
-                last_ts TIMESTAMP NOT NULL
-            )
-            """
-        )
-        dt_conn.exec_driver_sql(
-            """
-            CREATE TABLE IF NOT EXISTS downtime_intervals (
-                id SERIAL PRIMARY KEY,
-                equipment_id VARCHAR(64) NOT NULL,
-                status VARCHAR(32) NOT NULL,
-                start_ts TIMESTAMP NOT NULL,
-                end_ts TIMESTAMP,
-                source VARCHAR(16) NOT NULL DEFAULT 'auto',
-                note TEXT,
-                created_by VARCHAR(64)
-            )
-            """
-        )
-        dt_conn.exec_driver_sql(
-            """
-            ALTER TABLE IF EXISTS downtime_intervals
-            ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'auto'
-            """
-        )
-        dt_conn.exec_driver_sql(
-            """
-            ALTER TABLE IF EXISTS downtime_intervals
-            ADD COLUMN IF NOT EXISTS note TEXT
-            """
-        )
-        dt_conn.exec_driver_sql(
-            """
-            ALTER TABLE IF EXISTS downtime_intervals
-            ADD COLUMN IF NOT EXISTS created_by VARCHAR(64)
-            """
-        )
-        dt_conn.exec_driver_sql(
-            """
-            CREATE TABLE IF NOT EXISTS processing_state (
-                id INTEGER PRIMARY KEY,
-                last_event_id BIGINT NOT NULL DEFAULT 0
-            )
-            """
-        )
-        dt_conn.exec_driver_sql(
-            """
-            INSERT INTO processing_state (id, last_event_id)
-            VALUES (1, 0)
-            ON CONFLICT (id) DO NOTHING
-            """
-        )
-
         last_event_id = dt_conn.execute(
             text("SELECT last_event_id FROM processing_state WHERE id = 1")
         ).scalar_one()
@@ -86,6 +177,7 @@ def process_events():
             last_event_id = 0
 
     max_event_id = last_event_id
+    timeout_by_equipment = _load_timeout_map()
     with engine_events.begin() as ev_conn, engine_downtime.begin() as dt_conn:
         rows = ev_conn.execute(
             text(
@@ -119,96 +211,48 @@ def process_events():
             if manual_open:
                 if status != "RUN":
                     continue
-                dt_conn.execute(
-                    text(
-                        """
-                        UPDATE downtime_intervals
-                        SET end_ts = :ts
-                        WHERE equipment_id = :eid AND end_ts IS NULL
-                        """
-                    ),
-                    {"ts": ts, "eid": equipment_id},
-                )
-                dt_conn.execute(
-                    text(
-                        """
-                        INSERT INTO downtime_intervals (equipment_id, status, start_ts, end_ts, source)
-                        VALUES (:eid, 'RUN', :ts, NULL, 'auto')
-                        """
-                    ),
-                    {"eid": equipment_id, "ts": ts},
-                )
-                dt_conn.execute(
-                    text(
-                        """
-                        INSERT INTO equipment_state (equipment_id, last_status, last_ts)
-                        VALUES (:eid, 'RUN', :ts)
-                        ON CONFLICT (equipment_id)
-                        DO UPDATE SET last_status = EXCLUDED.last_status, last_ts = EXCLUDED.last_ts
-                        """
-                    ),
-                    {"eid": equipment_id, "ts": ts},
-                )
+                _close_open_interval(dt_conn, equipment_id, ts)
+                _insert_interval(dt_conn, equipment_id, "RUN", ts, None, "auto")
+                _upsert_equipment_state(dt_conn, equipment_id, "RUN", ts)
                 continue
 
             state = dt_conn.execute(
                 text("SELECT last_status, last_ts FROM equipment_state WHERE equipment_id = :eid"),
                 {"eid": equipment_id},
             ).fetchone()
+            timeout_sec = timeout_by_equipment.get(equipment_id, 60)
+            force_insert = False
+
+            if state is not None:
+                last_status, last_ts = state
+                gap_plan = plan_gap_transition(last_status, last_ts, ts, timeout_sec)
+                if gap_plan is not None:
+                    if last_status != "OFFLINE":
+                        _close_open_interval(dt_conn, equipment_id, gap_plan["close_previous_at"])
+                        _insert_closed_interval_segments(
+                            dt_conn,
+                            equipment_id=equipment_id,
+                            status="OFFLINE",
+                            start_ts=gap_plan["offline_start"],
+                            end_ts=gap_plan["offline_end"],
+                            source="auto",
+                        )
+                    else:
+                        _close_open_interval(dt_conn, equipment_id, gap_plan["offline_end"])
+                    state = ("OFFLINE", gap_plan["offline_end"])
+                    force_insert = True
 
             if state is None:
-                dt_conn.execute(
-                    text(
-                        """
-                        INSERT INTO equipment_state (equipment_id, last_status, last_ts)
-                        VALUES (:eid, :st, :ts)
-                        """
-                    ),
-                    {"eid": equipment_id, "st": status, "ts": ts},
-                )
-                dt_conn.execute(
-                    text(
-                        """
-                        INSERT INTO downtime_intervals (equipment_id, status, start_ts, end_ts, source)
-                        VALUES (:eid, :st, :ts, NULL, 'auto')
-                        """
-                    ),
-                    {"eid": equipment_id, "st": status, "ts": ts},
-                )
+                _upsert_equipment_state(dt_conn, equipment_id, status, ts)
+                _insert_interval(dt_conn, equipment_id, status, ts, None, "auto")
                 continue
 
             last_status, _ = state
-            if status != last_status:
-                dt_conn.execute(
-                    text(
-                        """
-                        UPDATE downtime_intervals
-                        SET end_ts = :ts
-                        WHERE equipment_id = :eid AND end_ts IS NULL
-                        """
-                    ),
-                    {"ts": ts, "eid": equipment_id},
-                )
-                dt_conn.execute(
-                    text(
-                        """
-                        INSERT INTO downtime_intervals (equipment_id, status, start_ts, end_ts, source)
-                        VALUES (:eid, :st, :ts, NULL, 'auto')
-                        """
-                    ),
-                    {"eid": equipment_id, "st": status, "ts": ts},
-                )
+            if force_insert or status != last_status:
+                _close_open_interval(dt_conn, equipment_id, ts)
+                _insert_interval(dt_conn, equipment_id, status, ts, None, "auto")
 
-            dt_conn.execute(
-                text(
-                    """
-                    UPDATE equipment_state
-                    SET last_status = :st, last_ts = :ts
-                    WHERE equipment_id = :eid
-                    """
-                ),
-                {"eid": equipment_id, "st": status, "ts": ts},
-            )
+            _upsert_equipment_state(dt_conn, equipment_id, status, ts)
 
         if max_event_id > last_event_id:
             dt_conn.execute(
@@ -235,17 +279,9 @@ def availability_check():
             last_status, last_ts = state
             if last_ts is None:
                 continue
-            if now - last_ts > timedelta(seconds=timeout_sec):
-                if last_status != "OFFLINE":
-                    dt_conn.execute(
-                        text("UPDATE downtime_intervals SET end_ts = :ts WHERE equipment_id = :eid AND end_ts IS NULL"),
-                        {"ts": now, "eid": equipment_id},
-                    )
-                    dt_conn.execute(
-                        text("INSERT INTO downtime_intervals (equipment_id, status, start_ts, end_ts, source) VALUES (:eid, 'OFFLINE', :ts, NULL, 'auto')"),
-                        {"eid": equipment_id, "ts": now},
-                    )
-                    dt_conn.execute(
-                        text("UPDATE equipment_state SET last_status = 'OFFLINE', last_ts = :ts WHERE equipment_id = :eid"),
-                        {"ts": now, "eid": equipment_id},
-                    )
+            gap_plan = plan_gap_transition(last_status, last_ts, now, timeout_sec)
+            if gap_plan is None or last_status == "OFFLINE":
+                continue
+            _close_open_interval(dt_conn, equipment_id, gap_plan["close_previous_at"])
+            _insert_interval(dt_conn, equipment_id, "OFFLINE", gap_plan["offline_start"], None, "auto")
+            _upsert_equipment_state(dt_conn, equipment_id, "OFFLINE", gap_plan["offline_start"])

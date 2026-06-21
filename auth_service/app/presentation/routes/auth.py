@@ -1,9 +1,11 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Header
+from fastapi import HTTPException
 
 from ...application.services import auth_service
 from ...domain.schemas import LoginIn, LogoutIn, RefreshIn, RegisterIn, RoleIn, RoleUpdateIn, UserCreateIn
+from ...infrastructure.redis_client import redis_client
 
 router = APIRouter()
 
@@ -21,7 +23,7 @@ def login(data: LoginIn):
 @router.post("/auth/register")
 def register(data: RegisterIn, authorization: str | None = Header(default=None)):
     auth_service.require_permission(authorization, "users.manage")
-    return auth_service.register(data.username, data.password, data.role)
+    return auth_service.register(data.username, data.password, data.role, full_name=data.full_name)
 
 
 @router.post("/auth/verify")
@@ -73,7 +75,7 @@ def users(authorization: str | None = Header(default=None)):
 
 @router.post("/auth/users")
 def create_user(data: UserCreateIn, authorization: str | None = Header(default=None)):
-    return auth_service.create_user_for_admin(authorization, data.username, data.password, data.role)
+    return auth_service.create_user_for_admin(authorization, data.username, data.password, data.role, full_name=data.full_name)
 
 
 @router.delete("/auth/users/{username}")
@@ -88,4 +90,8 @@ def delete_role(role_name: str, authorization: str | None = Header(default=None)
 
 @router.get("/health")
 def health():
+    try:
+        redis_client.ping()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"redis unavailable: {exc}") from exc
     return {"status": "ok", "ts": datetime.utcnow().isoformat()}

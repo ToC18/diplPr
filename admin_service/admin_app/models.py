@@ -38,6 +38,9 @@ class DowntimeInterval(models.Model):
     status = models.CharField(max_length=32)
     start_ts = models.DateTimeField()
     end_ts = models.DateTimeField(null=True, blank=True)
+    source = models.CharField(max_length=16, default="auto")
+    note = models.TextField(null=True, blank=True)
+    created_by = models.CharField(max_length=64, null=True, blank=True)
 
     class Meta:
         managed = False

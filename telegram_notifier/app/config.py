@@ -15,7 +15,7 @@ class Settings:
         for s in env_or_default("TELEGRAM_ALERT_STATUSES", "ALARM,STOP").split(",")
         if s.strip()
     }
-    queue_name = env_or_default("TELEGRAM_QUEUE_NAME", "equipment_events")
+    queue_name = env_or_default("TELEGRAM_QUEUE_NAME", "equipment_events_telegram")
 
 
 settings = Settings()

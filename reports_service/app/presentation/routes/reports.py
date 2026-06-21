@@ -1,11 +1,13 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
 from fastapi.responses import PlainTextResponse, StreamingResponse
+from pydantic import BaseModel
+from sqlalchemy import text
 
 from ...application.services import reports_service
-from ..dependencies.auth import require_admin, verify_token
+from ...database import engine_admin, engine_downtime, engine_events
+from ..dependencies.auth import require_admin, require_permission, verify_token
 
 router = APIRouter()
 
@@ -48,7 +50,7 @@ def get_equipment(
     search: str | None = None,
     eq_type: str | None = Query(default=None, alias="type"),
     protocol: str | None = None,
-    _=Depends(verify_token),
+    _=Depends(require_permission("reports.view")),
 ):
     return reports_service.get_equipment(search, eq_type, protocol)
 
@@ -64,22 +66,26 @@ def status_distribution(_=Depends(verify_token)):
 
 
 @router.get("/reports/timeline/{equipment_id}")
-def equipment_timeline(equipment_id: str, limit: int | None = None, _=Depends(verify_token)):
+def equipment_timeline(
+    equipment_id: str,
+    limit: int | None = None,
+    _=Depends(require_permission("reports.view")),
+):
     return reports_service.get_timeline(equipment_id, limit)
 
 
 @router.get("/reports/shift-summary")
-def shift_summary(_=Depends(verify_token)):
+def shift_summary(_=Depends(require_permission("reports.view"))):
     return reports_service.get_shift_summary()
 
 
 @router.get("/reports/events/export")
-def export_events(_=Depends(verify_token)):
+def export_events(_=Depends(require_permission("reports.view"))):
     return PlainTextResponse(reports_service.export_events_csv(), media_type="text/csv")
 
 
 @router.get("/reports/downtime/export")
-def export_downtime(_=Depends(verify_token)):
+def export_downtime(_=Depends(require_permission("reports.view"))):
     return PlainTextResponse(reports_service.export_downtime_csv(), media_type="text/csv")
 
 
@@ -132,4 +138,10 @@ def resolve_manual_downtime(
 
 @router.get("/health")
 def health():
+    with engine_events.begin() as conn:
+        conn.execute(text("SELECT 1"))
+    with engine_admin.begin() as conn:
+        conn.execute(text("SELECT 1"))
+    with engine_downtime.begin() as conn:
+        conn.execute(text("SELECT 1"))
     return {"status": "ok", "ts": datetime.utcnow().isoformat()}

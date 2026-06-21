@@ -1,8 +1,10 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import text
 
 from ...application.services import events_service
+from ...database import engine
 from ..dependencies.auth import verify_token
 from ...schemas import EventIn
 
@@ -31,4 +33,6 @@ def event_stats(_=Depends(verify_token)):
 
 @router.get("/health")
 def health():
+    with engine.begin() as conn:
+        conn.execute(text("SELECT 1"))
     return {"status": "ok", "ts": datetime.utcnow().isoformat()}

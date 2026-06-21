@@ -4,13 +4,16 @@ import { api, clearSession, getAccessToken, getRefreshToken, getSessionPermissio
 
 const REFRESH_MS = 2000
 const STATUS_COLORS = {
-  RUN: '#58d39b',
-  STOP: '#ffb66d',
-  ALARM: '#ff4d8d',
-  OFFLINE: '#94a8c0',
-  IDLE: '#ffd98f'
+  RUN: '#2f9e74',
+  STOP: '#e69138',
+  ALARM: '#d64562',
+  OFFLINE: '#8c97ab',
+  IDLE: '#d6b257',
+  UNKNOWN: '#7d89a0',
+  NO_DATA: '#a4afc2'
 }
 const DOWNTIME_STATUSES = new Set(['STOP', 'ALARM', 'OFFLINE', 'IDLE'])
+const ANALYTICS_DOWNTIME_STATUSES = new Set(['STOP', 'ALARM', 'IDLE'])
 
 function statusTone(status) {
   return `status ${String(status || '').toLowerCase()}`
@@ -22,8 +25,14 @@ function hasPermission(permission) {
   return Array.isArray(permissions) && (permissions.includes('*') || permissions.includes(permission))
 }
 
+const BUILTIN_ROLES = ['admin', 'operator', 'manager']
+
 function isDowntimeStatus(status) {
   return DOWNTIME_STATUSES.has(String(status || '').toUpperCase())
+}
+
+function isAnalyticsDowntimeStatus(status) {
+  return ANALYTICS_DOWNTIME_STATUSES.has(String(status || '').toUpperCase())
 }
 
 function normalizeTs(ts) {
@@ -57,12 +66,39 @@ function statusLabel(status) {
   return status
 }
 
+function excludeOfflineMinutes(rows = []) {
+  return rows.filter((row) => row.status !== 'OFFLINE')
+}
+
+function pluralizeRu(value, one, few, many) {
+  const abs = Math.abs(Number(value) || 0)
+  const mod10 = abs % 10
+  const mod100 = abs % 100
+  if (mod10 === 1 && mod100 !== 11) return one
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few
+  return many
+}
+
+function formatMinutesRu(totalMinutes) {
+  const minutes = Math.max(0, Math.round(Number(totalMinutes) || 0))
+  const hours = Math.floor(minutes / 60)
+  const mins = minutes % 60
+
+  if (hours > 0 && mins > 0) {
+    return `${hours} ${pluralizeRu(hours, 'час', 'часа', 'часов')} ${mins} ${pluralizeRu(mins, 'минута', 'минуты', 'минут')}`
+  }
+  if (hours > 0) {
+    return `${hours} ${pluralizeRu(hours, 'час', 'часа', 'часов')}`
+  }
+  return `${mins} ${pluralizeRu(mins, 'минута', 'минуты', 'минут')}`
+}
+
 function durationMinutes(startTs, endTs) {
   if (!startTs || !endTs) return '—'
   const s = new Date(normalizeTs(startTs)).getTime()
   const e = new Date(normalizeTs(endTs)).getTime()
   if (!Number.isFinite(s) || !Number.isFinite(e)) return '—'
-  return `${Math.max(0, Math.round((e - s) / 60000))}м`
+  return formatMinutesRu(Math.max(0, Math.round((e - s) / 60000)))
 }
 
 function toDayKey(ts) {
@@ -81,6 +117,32 @@ function getTodayKey() {
   const m = String(now.getMonth() + 1).padStart(2, '0')
   const day = String(now.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
+}
+
+function monthLabelRu(monthIndex) {
+  return ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'][monthIndex] || ''
+}
+
+function formatPct(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return '0%'
+  return `${Math.round(numeric)}%`
+}
+
+function getStatusColor(status) {
+  return STATUS_COLORS[status] || STATUS_COLORS.UNKNOWN
+}
+
+function getLiveDescriptor(live) {
+  if (live === 'ONLINE') return { label: 'В сети', tone: 'run' }
+  if (live === 'STALE') return { label: 'Нет новых данных', tone: 'offline' }
+  return { label: 'Нет сигнала', tone: 'idle' }
+}
+
+function clampPct(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return 0
+  return Math.max(0, Math.min(100, numeric))
 }
 
 function getDayBounds(dayKey) {
@@ -129,7 +191,7 @@ function StatusDonut({ distribution = [] }) {
             const d = `M 0 0 L ${x0} ${y0} A 1 1 0 ${large} 1 ${x1} ${y1} Z`
             return <path key={s.status} d={d} fill={s.color} opacity="0.9" />
           })}
-          <circle r="0.52" fill="#111922" />
+          <circle r="0.52" fill="var(--panel-strong)" stroke="var(--border)" strokeWidth="0.04" />
         </svg>
       </div>
       <div className="legend">
@@ -139,8 +201,9 @@ function StatusDonut({ distribution = [] }) {
   )
 }
 
-function MinutesDonut({ title, rows = [], totalLabel = 'мин' }) {
-  const total = rows.reduce((acc, row) => acc + Number(row.minutes || 0), 0) || 1
+function MinutesDonut({ title, rows = [], totalLabel = '' }) {
+  const rawTotal = rows.reduce((acc, row) => acc + Number(row.minutes || 0), 0)
+  const total = rawTotal || 1
   let acc = 0
   const slices = rows.map((row) => {
     const value = Number(row.minutes || 0)
@@ -163,18 +226,191 @@ function MinutesDonut({ title, rows = [], totalLabel = 'мин' }) {
             const x1 = Math.cos(a1)
             const y1 = Math.sin(a1)
             const d = `M 0 0 L ${x0} ${y0} A 1 1 0 ${large} 1 ${x1} ${y1} Z`
-            return <path key={s.status} d={d} fill={s.color} opacity="1" stroke="#0b1320" strokeWidth="0.02" />
+            return <path key={s.status} d={d} fill={s.color} opacity="1" stroke="var(--panel-strong)" strokeWidth="0.02" />
           })}
-          <circle r="0.52" fill="#111922" />
+          <circle r="0.52" fill="var(--panel-strong)" stroke="var(--border)" strokeWidth="0.04" />
         </svg>
-        <div className="donut-center">{Math.round(total)}<br />{totalLabel}</div>
+        <div className="donut-center">
+          {formatMinutesRu(rawTotal)}
+          {totalLabel ? <><br />{totalLabel}</> : null}
+        </div>
       </div>
       <div className="legend">
         {slices.map((s) => {
           const pct = Math.round((s.value / total) * 100)
-          return <div key={s.status}><span style={{ background: s.color }} />{statusLabel(s.status)}: {Math.round(s.value)} мин ({pct}%)</div>
+          return <div key={s.status}><span style={{ background: s.color }} />{statusLabel(s.status)}: {formatMinutesRu(s.value)} ({pct}%)</div>
         })}
       </div>
+    </div>
+  )
+}
+
+function TopStatusList({ rows = [], emptyLabel = 'Нет данных за период' }) {
+  if (!rows.length) return <div className="sub">{emptyLabel}</div>
+
+  const topRows = rows.slice(0, 4)
+  const maxValue = Math.max(1, ...topRows.map((row) => Number(row.minutes || 0)))
+
+  return (
+    <div className="bars compact-bars">
+      {topRows.map((row) => (
+        <div key={row.status} className="bar-row">
+          <div className="bar-label">{statusLabel(row.status)}</div>
+          <div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(6, (Number(row.minutes || 0) / maxValue) * 100)}%` }} /></div>
+          <div className="bar-val">{formatMinutesRu(row.minutes)}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function StationPeriodChart({ title, buckets = [] }) {
+  const maxCount = Math.max(1, ...buckets.map((bucket) => Number(bucket.count || 0)))
+
+  return (
+    <div className="report-note">
+      <div className="kpi-label">{title}</div>
+      <div className="station-period-chart">
+        {buckets.map((bucket) => (
+          <div key={bucket.key} className="station-period-col" title={`${bucket.label}: ${bucket.count}`}>
+            <div className="station-period-bar-wrap">
+              <div
+                className="station-period-bar"
+                style={{ height: `${bucket.count ? Math.max(8, (bucket.count / maxCount) * 100) : 4}%` }}
+              />
+            </div>
+            <div className="station-period-value">{bucket.count > 0 ? bucket.count : ''}</div>
+            <div className="station-period-label">{bucket.label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function TimeBarsCard({ title, subtitle = '', buckets = [], mode = 'count' }) {
+  const maxValue = Math.max(1, ...buckets.map((bucket) => Number(bucket.count || bucket.value || 0)))
+
+  return (
+    <div className="chart-card chart-card-rich">
+      <div className="chart-head">
+        <div>
+          <h3>{title}</h3>
+          {subtitle ? <div className="sub">{subtitle}</div> : null}
+        </div>
+      </div>
+      <div className="time-bars">
+        {buckets.map((bucket) => {
+          const rawValue = Number(bucket.count ?? bucket.value ?? 0)
+          const pct = rawValue > 0 ? Math.max(8, (rawValue / maxValue) * 100) : 0
+          return (
+            <div key={bucket.key} className="time-bars-col" title={`${bucket.label}: ${rawValue}`}>
+              <div className="time-bars-value">
+                {rawValue > 0 ? (mode === 'minutes' ? formatMinutesRu(rawValue) : rawValue) : ''}
+              </div>
+              <div className="time-bars-track">
+                <div className="time-bars-fill" style={{ height: `${pct}%` }} />
+              </div>
+              <div className="time-bars-label">{bucket.label}</div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function StatusSegmentsCard({ title, rows = [], subtitle = '' }) {
+  const total = rows.reduce((acc, row) => acc + Number(row.minutes || 0), 0)
+
+  return (
+    <div className="chart-card chart-card-rich">
+      <div className="chart-head">
+        <div>
+          <h3>{title}</h3>
+          {subtitle ? <div className="sub">{subtitle}</div> : null}
+        </div>
+        <div className="chart-total">{formatMinutesRu(total)}</div>
+      </div>
+      <div className="segments-track">
+        {rows.length
+          ? rows.map((row) => (
+            <div
+              key={row.status}
+              className="segments-part"
+              style={{
+                width: `${Math.max(4, total > 0 ? (Number(row.minutes || 0) / total) * 100 : 0)}%`,
+                background: getStatusColor(row.status)
+              }}
+              title={`${statusLabel(row.status)}: ${formatMinutesRu(row.minutes)}`}
+            />
+          ))
+          : <div className="segments-empty">Нет данных за выбранный период</div>}
+      </div>
+      <div className="segments-list">
+        {rows.map((row) => {
+          const pct = total > 0 ? Math.round((Number(row.minutes || 0) / total) * 100) : 0
+          return (
+            <div key={row.status} className="segments-item">
+              <div className="segments-item-name">
+                <span className="segments-dot" style={{ background: getStatusColor(row.status) }} />
+                {statusLabel(row.status)}
+              </div>
+              <div className="segments-item-meta">{formatMinutesRu(row.minutes)} · {pct}%</div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function EquipmentAnalyticsGrid({ items = [], emptyLabel = 'Нет оборудования для отображения' }) {
+  if (!items.length) {
+    return <div className="chart-card"><div className="sub">{emptyLabel}</div></div>
+  }
+
+  return (
+    <div className="equipment-analytics-grid">
+      {items.map((item) => {
+        const liveMeta = getLiveDescriptor(item.live)
+        const stateTone = ['RUN', 'STOP', 'ALARM', 'OFFLINE', 'IDLE'].includes(item.status)
+          ? statusTone(item.status).replace('status ', '')
+          : 'idle'
+
+        return (
+          <article key={item.id} className="equipment-analytics-card">
+            <div className="equipment-analytics-top">
+              <div>
+                <div className="equip-title">{item.name || item.id}</div>
+                <div className="sub">{item.id}</div>
+              </div>
+              <span className={`status ${liveMeta.tone}`}>{liveMeta.label}</span>
+            </div>
+            <div className="equipment-analytics-tags">
+              {item.type ? <span className="tag">{item.type}</span> : null}
+              {item.protocol ? <span className="tag">{item.protocol}</span> : null}
+              <span className={`status ${stateTone}`}>{statusLabel(item.status)}</span>
+            </div>
+            <div className="equipment-analytics-stats">
+              <div><span>События</span><strong>{item.eventsCount ?? 0}</strong></div>
+              <div><span>Простой</span><strong>{formatMinutesRu(item.downtimeMinutes ?? 0)}</strong></div>
+              <div><span>Последний сигнал</span><strong>{item.ageSec != null ? `${item.ageSec} сек` : '—'}</strong></div>
+            </div>
+            {item.availability != null ? (
+              <div className="availability-strip">
+                <div className="availability-strip-head">
+                  <span>Доступность</span>
+                  <strong>{formatPct(item.availability)}</strong>
+                </div>
+                <div className="availability-strip-track">
+                  <div className="availability-strip-fill" style={{ width: `${clampPct(item.availability)}%` }} />
+                </div>
+              </div>
+            ) : null}
+          </article>
+        )
+      })}
     </div>
   )
 }
@@ -196,7 +432,7 @@ function DowntimeBars({ downtime = [], dayKey = '' }) {
           <div key={r.id} className="bar-row">
             <div className="bar-label">{r.id}</div>
             <div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(4, (r.mins / max) * 100)}%` }} /></div>
-            <div className="bar-val">{r.mins}</div>
+            <div className="bar-val">{formatMinutesRu(r.mins)}</div>
           </div>
         ))}
       </div>
@@ -476,6 +712,7 @@ function RegisterPage() {
         <label>Роль
           <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
             <option value="operator">Оператор</option>
+            <option value="manager">Руководитель / аналитик</option>
             <option value="admin">Администратор</option>
           </select>
         </label>
@@ -488,6 +725,7 @@ function RegisterPage() {
 }
 
 function useDashboardData() {
+  const canReadReports = hasPermission('reports.view')
   const [summary, setSummary] = useState({ total_events: 0, total_equipment: 0, open_intervals: 0 })
   const [equipment, setEquipment] = useState([])
   const [events, setEvents] = useState([])
@@ -510,7 +748,7 @@ function useDashboardData() {
         api.getEquipment(),
         api.getEvents(),
         api.getDowntime(),
-        api.getReports(),
+        canReadReports ? api.getReports() : Promise.resolve([]),
         api.getStatusDistribution(),
         api.getCurrentDowntime(),
         api.getEquipmentState(),
@@ -541,7 +779,7 @@ function useDashboardData() {
       mounted = false
       clearInterval(timer)
     }
-  }, [])
+  }, [canReadReports])
 
   return { summary, equipment, events, downtime, currentDowntime, equipmentState, equipmentLive, reports, statusDistribution, error }
 }
@@ -550,11 +788,22 @@ function AppLayout() {
   const navigate = useNavigate()
   const data = useDashboardData()
   const [selectedDay, setSelectedDay] = useState(getTodayKey())
+  const [theme, setTheme] = useState(() => localStorage.getItem('ui-theme') || 'light')
 
   const alarmsCount = useMemo(() => {
     const row = (data.statusDistribution || []).find((x) => x.status === 'ALARM')
     return row?.count ?? 0
   }, [data.statusDistribution])
+
+  useEffect(() => {
+    document.body.classList.toggle('theme-dark', theme === 'dark')
+    localStorage.setItem('ui-theme', theme)
+  }, [theme])
+
+  const [currentUser, setCurrentUser] = useState(null)
+  useEffect(() => {
+    api.me().then(setCurrentUser).catch(() => null)
+  }, [])
 
   const logout = async () => {
     const refresh = getRefreshToken()
@@ -566,22 +815,53 @@ function AppLayout() {
     navigate('/login', { replace: true })
   }
 
+  const userDisplayName = currentUser?.full_name || currentUser?.username || 'Пользователь'
+  const userRoleName = currentUser?.role || 'Оператор'
+  const userInitials = userDisplayName.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2)
+
   return (
     <div className="app">
       <aside className="sidebar">
-        <div className="brand-title">Мониторинг простоев</div>
+        <div className="sidebar-top">
+          <div className="brand-title">Мониторинг простоев</div>
+          <button
+            className={`theme-switch ${theme === 'dark' ? 'is-dark' : ''}`}
+            type="button"
+            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            aria-label={theme === 'dark' ? 'Включить светлую тему' : 'Включить темную тему'}
+            title={theme === 'dark' ? 'Светлая тема' : 'Темная тема'}
+          >
+            <span className="theme-switch-track">
+              <span className="theme-switch-thumb" />
+            </span>
+            <span className="theme-switch-text">
+              <span className="theme-switch-mode">{theme === 'dark' ? 'Темная' : 'Светлая'}</span>
+              <span className="theme-switch-hint">тема</span>
+            </span>
+          </button>
+        </div>
         <nav className="nav">
           <NavLink to="/overview" className="nav-item">Обзор</NavLink>
           <NavLink to="/equipment" className="nav-item">Оборудование</NavLink>
           <NavLink to="/events-log" className="nav-item">События</NavLink>
           <NavLink to="/downtime-log" className="nav-item">Простои</NavLink>
-          <NavLink to="/reports-view" className="nav-item">Отчеты</NavLink>
+          {hasPermission('reports.view') && <NavLink to="/reports-view" className="nav-item">Отчеты</NavLink>}
           {hasPermission('admin.panel') && <NavLink to="/admin-panel" className="nav-item">Админ</NavLink>}
         </nav>
         <button className="ghost" onClick={logout}>Выйти</button>
       </aside>
 
       <main className="main">
+        <div className="header-top">
+          <div className="user-profile">
+            <div className="user-info">
+              <span className="user-name">{userDisplayName}</span>
+              <span className="user-role">{userRoleName}</span>
+            </div>
+            <div className="user-avatar">{userInitials}</div>
+          </div>
+        </div>
+
         {data.error && <div className="banner error">{data.error}</div>}
         <div className="table-card" style={{ marginBottom: 14 }}>
           <label>
@@ -594,7 +874,7 @@ function AppLayout() {
           <Route path="/equipment" element={<EquipmentPage data={data} />} />
           <Route path="/events-log" element={<EventsPage data={data} selectedDay={selectedDay} />} />
           <Route path="/downtime-log" element={<DowntimePage data={data} selectedDay={selectedDay} />} />
-          <Route path="/reports-view" element={<ReportsPage data={data} alarmsCount={alarmsCount} selectedDay={selectedDay} />} />
+          <Route path="/reports-view" element={<PermissionProtected permission="reports.view"><ReportsPage data={data} alarmsCount={alarmsCount} selectedDay={selectedDay} /></PermissionProtected>} />
           <Route path="/admin-panel" element={<PermissionProtected permission="admin.panel"><AdminPage /></PermissionProtected>} />
           <Route path="*" element={<Navigate to="/overview" replace />} />
         </Routes>
@@ -605,37 +885,167 @@ function AppLayout() {
 
 function OverviewPage({ data, alarmsCount, selectedDay }) {
   const dayEvents = data.events.filter((x) => toDayKey(x.ts) === selectedDay)
-  const dayDowntime = data.downtime.filter((x) => isDowntimeStatus(x.status) && (toDayKey(x.start_ts) === selectedDay || toDayKey(x.end_ts) === selectedDay))
+  const dayIntervals = useMemo(
+    () => data.downtime.filter((x) => toDayKey(x.start_ts) === selectedDay || toDayKey(x.end_ts) === selectedDay),
+    [data.downtime, selectedDay]
+  )
+  const dayDowntime = dayIntervals.filter((x) => isAnalyticsDowntimeStatus(x.status))
   const dayStatusMinutes = useMemo(() => {
     const map = new Map()
-    data.downtime
-      .filter((x) => toDayKey(x.start_ts) === selectedDay || toDayKey(x.end_ts) === selectedDay)
-      .forEach((x) => {
+    dayIntervals.forEach((x) => {
         const mins = overlapMinutesInDay(x.start_ts, x.end_ts, selectedDay)
         map.set(x.status || 'UNKNOWN', (map.get(x.status || 'UNKNOWN') || 0) + mins)
       })
     return Array.from(map.entries()).map(([status, minutes]) => ({ status, minutes })).sort((a, b) => b.minutes - a.minutes)
-  }, [data.downtime, selectedDay])
+  }, [dayIntervals, selectedDay])
+  const equipmentStatusCharts = useMemo(() => {
+    const equipmentRows = [...(data.equipment || [])].sort((a, b) => (
+      String(a.equipment_id || '').localeCompare(String(b.equipment_id || ''), 'ru')
+    ))
+
+    return equipmentRows.map((equipment) => {
+      const map = new Map()
+      dayIntervals
+        .filter((interval) => interval.equipment_id === equipment.equipment_id)
+        .forEach((interval) => {
+          const mins = overlapMinutesInDay(interval.start_ts, interval.end_ts, selectedDay)
+          const status = interval.status || 'UNKNOWN'
+          map.set(status, (map.get(status) || 0) + mins)
+        })
+
+      const rows = Array.from(map.entries())
+        .map(([status, minutes]) => ({ status, minutes }))
+        .sort((a, b) => b.minutes - a.minutes)
+
+      return {
+        equipment_id: equipment.equipment_id,
+        name: equipment.name,
+        rows: excludeOfflineMinutes(rows),
+      }
+    })
+  }, [data.equipment, dayIntervals, selectedDay])
   const downtimeMinutes = dayDowntime.reduce((acc, row) => {
     return acc + overlapMinutesInDay(row.start_ts, row.end_ts, selectedDay)
   }, 0)
   const alarmsToday = dayEvents.filter((x) => x.status === 'ALARM').length
+  const dayActivityBuckets = useMemo(() => {
+    const buckets = Array.from({ length: 24 }, (_, hour) => ({
+      key: `overview-h-${hour}`,
+      label: String(hour).padStart(2, '0'),
+      count: 0
+    }))
+    dayEvents.forEach((event) => {
+      const d = new Date(normalizeTs(event.ts))
+      if (Number.isNaN(d.getTime())) return
+      buckets[d.getHours()].count += 1
+    })
+    return buckets
+  }, [dayEvents])
+  const runMinutes = dayStatusMinutes.find((row) => row.status === 'RUN')?.minutes || 0
+  const trackedMinutes = runMinutes + downtimeMinutes
+  const availabilityPct = trackedMinutes > 0 ? Math.round((runMinutes / trackedMinutes) * 100) : 0
+  const peakBucket = [...dayActivityBuckets].sort((a, b) => b.count - a.count)[0]
+  const liveSummary = useMemo(() => {
+    const rows = data.equipmentLive || []
+    return {
+      online: rows.filter((row) => row.live === 'ONLINE').length,
+      stale: rows.filter((row) => row.live === 'STALE').length,
+      noData: rows.filter((row) => !row.live || row.live === 'NO_DATA').length
+    }
+  }, [data.equipmentLive])
+  const equipmentAnalytics = useMemo(() => {
+    const eventsById = new Map()
+    dayEvents.forEach((event) => eventsById.set(event.equipment_id, (eventsById.get(event.equipment_id) || 0) + 1))
+    const downtimeById = new Map()
+    dayDowntime.forEach((row) => {
+      const mins = overlapMinutesInDay(row.start_ts, row.end_ts, selectedDay)
+      downtimeById.set(row.equipment_id, (downtimeById.get(row.equipment_id) || 0) + mins)
+    })
+    const liveById = new Map((data.equipmentLive || []).map((row) => [row.equipment_id, row]))
+    const stateById = new Map((data.equipmentState || []).map((row) => [row.equipment_id, row.last_status]))
+
+    return [...(data.equipment || [])]
+      .sort((a, b) => String(a.equipment_id || '').localeCompare(String(b.equipment_id || ''), 'ru'))
+      .map((row) => {
+        const eventCount = eventsById.get(row.equipment_id) || 0
+        const downtime = downtimeById.get(row.equipment_id) || 0
+        const run = dayIntervals
+          .filter((interval) => interval.equipment_id === row.equipment_id && interval.status === 'RUN')
+          .reduce((acc, interval) => acc + overlapMinutesInDay(interval.start_ts, interval.end_ts, selectedDay), 0)
+        const tracked = run + downtime
+        return {
+          id: row.equipment_id,
+          name: row.name,
+          type: row.type,
+          protocol: row.protocol,
+          status: stateById.get(row.equipment_id) || 'NO_DATA',
+          live: liveById.get(row.equipment_id)?.live || 'NO_DATA',
+          ageSec: liveById.get(row.equipment_id)?.age_sec,
+          eventsCount: eventCount,
+          downtimeMinutes: downtime,
+          availability: tracked > 0 ? Math.round((run / tracked) * 100) : 0
+        }
+      })
+  }, [data.equipment, data.equipmentLive, data.equipmentState, dayDowntime, dayEvents, dayIntervals, selectedDay])
 
   return (
     <section className="table-card">
-      <h2>{`Обзор за ${selectedDay}`}</h2>
+      <div className="hero-panel">
+        <div>
+          <div className="hero-eyebrow">Оперативная аналитика</div>
+          <h2>{`Обзор за ${selectedDay}`}</h2>
+          <p className="hero-copy">Краткая картина по активности оборудования, загрузке событий и устойчивости производственного контура за выбранный день.</p>
+        </div>
+        <div className="hero-chips">
+          <div className="hero-chip">
+            <span>Доступность</span>
+            <strong>{formatPct(availabilityPct)}</strong>
+          </div>
+          <div className="hero-chip">
+            <span>Пик активности</span>
+            <strong>{peakBucket?.count ? `${peakBucket.label}:00` : '—'}</strong>
+          </div>
+          <div className="hero-chip">
+            <span>В сети</span>
+            <strong>{liveSummary.online}</strong>
+          </div>
+        </div>
+      </div>
       <div className="kpi-grid">
         <div className="kpi-card"><div className="kpi-label">События за день</div><div className="kpi-value">{dayEvents.length}</div></div>
         <div className="kpi-card"><div className="kpi-label">Оборудование</div><div className="kpi-value">{data.equipment.length || data.summary.total_equipment}</div></div>
-        <div className="kpi-card"><div className="kpi-label">Простой за день, мин</div><div className="kpi-value">{downtimeMinutes}</div></div>
+        <div className="kpi-card"><div className="kpi-label">Простой за день</div><div className="kpi-value">{formatMinutesRu(downtimeMinutes)}</div></div>
         <div className="kpi-card"><div className="kpi-label">Аварии за день</div><div className="kpi-value">{alarmsToday || alarmsCount}</div></div>
       </div>
       <div className="charts-grid">
-        <MinutesDonut title="Анализ времени работы и простоев" rows={dayStatusMinutes} />
-        <DailyEventsBars events={data.events} />
+        <MinutesDonut title="Структура времени за день" rows={excludeOfflineMinutes(dayStatusMinutes)} />
+        <TimeBarsCard title="Активность по часам" subtitle="Количество событий в течение суток" buckets={dayActivityBuckets} />
+        <StatusSegmentsCard title="Баланс состояний" subtitle="Распределение tracked-времени между рабочими и нерабочими статусами" rows={excludeOfflineMinutes(dayStatusMinutes)} />
       </div>
       <div className="charts-grid">
         <DowntimeBars downtime={dayDowntime} dayKey={selectedDay} />
+        <div className="chart-card chart-card-rich">
+          <div className="chart-head">
+            <div>
+              <h3>Сигнал оборудования</h3>
+              <div className="sub">Текущее состояние обновления телеметрии по станкам</div>
+            </div>
+          </div>
+          <div className="signal-summary-grid">
+            <div className="signal-summary-card"><span>В сети</span><strong>{liveSummary.online}</strong></div>
+            <div className="signal-summary-card"><span>Нет новых данных</span><strong>{liveSummary.stale}</strong></div>
+            <div className="signal-summary-card"><span>Нет сигнала</span><strong>{liveSummary.noData}</strong></div>
+          </div>
+        </div>
+      </div>
+      <div className="chart-card chart-card-rich">
+        <div className="chart-head">
+          <div>
+            <h3>Профили станков за день</h3>
+            <div className="sub">Карточки строятся автоматически для всего оборудования и показывают события, простой и текущий сигнал.</div>
+          </div>
+        </div>
+        <EquipmentAnalyticsGrid items={equipmentAnalytics} />
       </div>
       <div className="charts-grid">
         <EquipmentStateTable rows={data.equipmentState} />
@@ -643,6 +1053,19 @@ function OverviewPage({ data, alarmsCount, selectedDay }) {
       </div>
       <div className="charts-grid">
         <EquipmentLiveTable rows={data.equipmentLive} />
+      </div>
+      <div className="charts-grid">
+        {equipmentStatusCharts.map((chart) => (
+          chart.rows.length > 0
+            ? <MinutesDonut key={chart.equipment_id} title={`Статусы по времени: ${chart.equipment_id}`} rows={chart.rows} />
+            : (
+              <div key={chart.equipment_id} className="chart-card">
+                <h3>{`Статусы по времени: ${chart.equipment_id}`}</h3>
+                <div className="sub">{chart.name || chart.equipment_id}</div>
+                <div className="sub" style={{ marginTop: 10 }}>За выбранный день данных пока нет.</div>
+              </div>
+            )
+        ))}
       </div>
     </section>
   )
@@ -814,7 +1237,7 @@ function EventsPage({ data, selectedDay }) {
         <div className="kpi-card"><div className="kpi-label">Записей</div><div className="kpi-value">{filteredEvents.length}</div></div>
         <div className="kpi-card"><div className="kpi-label">Оборудование</div><div className="kpi-value">{uniqueEquipment}</div></div>
         <div className="kpi-card"><div className="kpi-label">ALARM</div><div className="kpi-value">{alarms}</div></div>
-        <div className="kpi-card"><div className="kpi-label">Сумма простоя, мин</div><div className="kpi-value">{totalDowntime}</div></div>
+        <div className="kpi-card"><div className="kpi-label">Сумма простоя</div><div className="kpi-value">{formatMinutesRu(totalDowntime)}</div></div>
       </div>
       <div className="events-toolbar">
         <input
@@ -831,7 +1254,7 @@ function EventsPage({ data, selectedDay }) {
           <option value="IDLE">ПРОСТОЙ</option>
         </select>
         <select value={equipmentFilter} onChange={(e) => setEquipmentFilter(e.target.value)}>
-          <option value="all">Все ИД</option>
+          <option value="all">Все ID</option>
           {equipmentOptions.map((id) => <option key={id} value={id}>{id}</option>)}
         </select>
         <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
@@ -843,7 +1266,7 @@ function EventsPage({ data, selectedDay }) {
       <table>
         <thead><tr><th>Оборудование</th><th>Статус</th><th>Начало</th><th>Конец</th><th>Простой, мин</th><th>Источник</th><th>Комментарий</th><th>Автор</th></tr></thead>
         <tbody>
-          {filteredEvents.map((x) => <tr key={`${x.equipment_id}-${x.start_ts}-${x.status}`}><td>{x.equipment_id}</td><td><span className={statusTone(x.status)}>{statusLabel(x.status)}</span></td><td>{formatTs(x.start_ts)}</td><td>{formatTs(x.end_ts)}</td><td>{x.downtime_minutes ?? 0}</td><td>{sourceLabel(x.source)}</td><td>{x.note || '—'}</td><td>{x.created_by || '—'}</td></tr>)}
+          {filteredEvents.map((x) => <tr key={`${x.equipment_id}-${x.start_ts}-${x.status}`}><td>{x.equipment_id}</td><td><span className={statusTone(x.status)}>{statusLabel(x.status)}</span></td><td>{formatTs(x.start_ts)}</td><td>{formatTs(x.end_ts)}</td><td>{formatMinutesRu(x.downtime_minutes ?? 0)}</td><td>{sourceLabel(x.source)}</td><td>{x.note || '—'}</td><td>{x.created_by || '—'}</td></tr>)}
         </tbody>
       </table>
     </section>
@@ -916,7 +1339,7 @@ function DowntimePage({ data, selectedDay }) {
         <div className="kpi-card"><div className="kpi-label">Кол-во простоев</div><div className="kpi-value">{filteredDowntime.length}</div></div>
         <div className="kpi-card"><div className="kpi-label">Текущие простои</div><div className="kpi-value">{data.currentDowntime.length}</div></div>
         <div className="kpi-card"><div className="kpi-label">Ручные</div><div className="kpi-value">{manualDowntime.length}</div></div>
-        <div className="kpi-card"><div className="kpi-label">Суммарно, мин</div><div className="kpi-value">{totalDuration}</div></div>
+        <div className="kpi-card"><div className="kpi-label">Суммарно</div><div className="kpi-value">{formatMinutesRu(totalDuration)}</div></div>
       </div>
       <div className="downtime-toolbar">
         <input
@@ -932,7 +1355,7 @@ function DowntimePage({ data, selectedDay }) {
           <option value="IDLE">ПРОСТОЙ</option>
         </select>
         <select value={equipmentFilter} onChange={(e) => setEquipmentFilter(e.target.value)}>
-          <option value="all">Все ИД</option>
+          <option value="all">Все ID</option>
           {equipmentOptions.map((id) => <option key={id} value={id}>{id}</option>)}
         </select>
         <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
@@ -950,7 +1373,7 @@ function DowntimePage({ data, selectedDay }) {
           </select>
           <input type="date" value={focusDay} onChange={(e) => setFocusDay(e.target.value || selectedDay)} />
           <div className="kpi-card"><div className="kpi-label">Кол-во простоев</div><div className="kpi-value">{focusedRows.length}</div></div>
-          <div className="kpi-card"><div className="kpi-label">Минуты</div><div className="kpi-value">{focusedTotal}</div></div>
+          <div className="kpi-card"><div className="kpi-label">Суммарно</div><div className="kpi-value">{formatMinutesRu(focusedTotal)}</div></div>
         </div>
         <table>
           <thead><tr><th>Оборудование</th><th>Статус</th><th>Начало</th><th>Конец</th><th>Длительность</th><th>Источник</th></tr></thead>
@@ -1026,7 +1449,7 @@ function ReportsPage({ data, alarmsCount, selectedDay }) {
   )
   const periodDowntime = useMemo(
     () => data.downtime
-      .filter((x) => isDowntimeStatus(x.status))
+      .filter((x) => isAnalyticsDowntimeStatus(x.status))
       .filter((x) => inPeriod(x.start_ts) || inPeriod(x.end_ts)),
     [data.downtime, periodType, periodDay, periodMonth, periodYear]
   )
@@ -1035,9 +1458,29 @@ function ReportsPage({ data, alarmsCount, selectedDay }) {
     [data.downtime, periodType, periodDay, periodMonth, periodYear]
   )
   const [stationId, setStationId] = useState('')
+  const equipmentMetaById = useMemo(() => {
+    const map = new Map()
+    ;[...(data.equipment || []), ...(data.reports || [])].forEach((row) => {
+      if (!row?.equipment_id || map.has(row.equipment_id)) return
+      map.set(row.equipment_id, row)
+    })
+    return map
+  }, [data.equipment, data.reports])
+  const liveById = useMemo(
+    () => new Map((data.equipmentLive || []).map((row) => [row.equipment_id, row.live])),
+    [data.equipmentLive]
+  )
+  const stateById = useMemo(
+    () => new Map((data.equipmentState || []).map((row) => [row.equipment_id, row.last_status])),
+    [data.equipmentState]
+  )
   const stationOptions = useMemo(
-    () => [...new Set(periodIntervals.map((x) => x.equipment_id).filter(Boolean))].sort(),
-    [periodIntervals]
+    () => [...new Set([
+      ...periodIntervals.map((x) => x.equipment_id),
+      ...periodEvents.map((x) => x.equipment_id),
+      ...(data.equipment || []).map((x) => x.equipment_id)
+    ].filter(Boolean))].sort(),
+    [periodIntervals, periodEvents, data.equipment]
   )
   const statusDistribution = useMemo(() => {
     const map = new Map()
@@ -1077,15 +1520,50 @@ function ReportsPage({ data, alarmsCount, selectedDay }) {
   const availabilityPct = totalTrackedMinutes > 0
     ? Math.round((runMinutes / totalTrackedMinutes) * 100)
     : 0
-  const hourly = useMemo(() => {
-    const buckets = Array.from({ length: 24 }, (_, h) => ({ hour: h, count: 0 }))
+  const activityChart = useMemo(() => {
+    if (periodType === 'day') {
+      const buckets = Array.from({ length: 24 }, (_, h) => ({
+        key: `h-${h}`,
+        label: `${String(h).padStart(2, '0')}:00`,
+        count: 0
+      }))
+      periodEvents.forEach((x) => {
+        const d = new Date(normalizeTs(x.ts))
+        if (Number.isNaN(d.getTime())) return
+        buckets[d.getHours()].count += 1
+      })
+      return { title: 'Пиковые часы активности', buckets }
+    }
+
+    if (periodType === 'month') {
+      const [y, m] = periodMonth.split('-').map(Number)
+      const daysInMonth = new Date(y, m || 1, 0).getDate()
+      const buckets = Array.from({ length: daysInMonth }, (_, idx) => ({
+        key: `d-${idx + 1}`,
+        label: String(idx + 1).padStart(2, '0'),
+        count: 0
+      }))
+      periodEvents.forEach((x) => {
+        const d = new Date(normalizeTs(x.ts))
+        if (Number.isNaN(d.getTime())) return
+        const day = d.getDate()
+        if (day >= 1 && day <= daysInMonth) buckets[day - 1].count += 1
+      })
+      return { title: 'Активность по дням', buckets }
+    }
+
+    const buckets = Array.from({ length: 12 }, (_, idx) => ({
+      key: `m-${idx + 1}`,
+      label: monthLabelRu(idx),
+      count: 0
+    }))
     periodEvents.forEach((x) => {
       const d = new Date(normalizeTs(x.ts))
       if (Number.isNaN(d.getTime())) return
-      buckets[d.getHours()].count += 1
+      buckets[d.getMonth()].count += 1
     })
-    return buckets
-  }, [periodEvents])
+    return { title: 'Активность по месяцам', buckets }
+  }, [periodEvents, periodType, periodMonth])
   const topByEvents = useMemo(() => {
     const map = new Map()
     periodEvents.forEach((x) => map.set(x.equipment_id, (map.get(x.equipment_id) || 0) + 1))
@@ -1094,21 +1572,143 @@ function ReportsPage({ data, alarmsCount, selectedDay }) {
   const topByDowntime = useMemo(() => {
     const map = new Map()
     periodDowntime.forEach((x) => {
-      const s = new Date(normalizeTs(x.start_ts)).getTime()
-      const e = x.end_ts ? new Date(normalizeTs(x.end_ts)).getTime() : Date.now()
-      if (!Number.isFinite(s) || !Number.isFinite(e)) return
-      const mins = Math.max(0, Math.round((e - s) / 60000))
+      const mins = overlapMinutesInBounds(x.start_ts, x.end_ts)
       map.set(x.equipment_id, (map.get(x.equipment_id) || 0) + mins)
     })
     return Array.from(map.entries()).map(([id, mins]) => ({ id, mins })).sort((a, b) => b.mins - a.mins).slice(0, 8)
-  }, [periodDowntime])
+  }, [periodDowntime, periodBounds.startMs, periodBounds.endMs])
   const totalDowntimeCount = periodDowntime.length
-  const uniqueEquipment = new Set(periodEvents.map((x) => x.equipment_id)).size
-  const maxHourly = Math.max(1, ...hourly.map((x) => x.count))
+  const uniqueEquipment = stationOptions.length
+  const maxActivity = Math.max(1, ...activityChart.buckets.map((x) => x.count))
+  const stationReports = useMemo(() => stationOptions.map((equipmentId) => {
+    const meta = equipmentMetaById.get(equipmentId) || {}
+    const events = periodEvents
+      .filter((row) => row.equipment_id === equipmentId)
+      .sort((a, b) => new Date(normalizeTs(b.ts)).getTime() - new Date(normalizeTs(a.ts)).getTime())
+    const intervals = periodIntervals.filter((row) => row.equipment_id === equipmentId)
+    const statusMap = new Map()
+
+    intervals.forEach((row) => {
+      const status = row.status || 'UNKNOWN'
+      const mins = overlapMinutesInBounds(row.start_ts, row.end_ts)
+      statusMap.set(status, (statusMap.get(status) || 0) + mins)
+    })
+
+    const statusRows = Array.from(statusMap.entries())
+      .map(([status, minutes]) => ({ status, minutes }))
+      .sort((a, b) => b.minutes - a.minutes)
+
+    const analyticsDowntimeMinutes = statusRows
+      .filter((row) => isAnalyticsDowntimeStatus(row.status))
+      .reduce((acc, row) => acc + row.minutes, 0)
+    const offlineMinutes = statusRows
+      .filter((row) => row.status === 'OFFLINE')
+      .reduce((acc, row) => acc + row.minutes, 0)
+    const runMinutesLocal = statusRows.find((row) => row.status === 'RUN')?.minutes || 0
+    const trackedMinutes = runMinutesLocal + analyticsDowntimeMinutes
+    const availability = trackedMinutes > 0 ? (runMinutesLocal / trackedMinutes) * 100 : 0
+    const alarmCount = events.filter((row) => row.status === 'ALARM').length
+    const dominant = excludeOfflineMinutes(statusRows).find((row) => row.minutes > 0)?.status || statusRows[0]?.status || 'NO_DATA'
+    const lastEvent = events[0]?.ts || ''
+    const live = liveById.get(equipmentId) || 'NO_DATA'
+    const currentStatus = stateById.get(equipmentId) || dominant || 'NO_DATA'
+    const periodBuckets = (() => {
+      if (periodType === 'day') {
+        const buckets = Array.from({ length: 24 }, (_, hour) => ({
+          key: `${equipmentId}-h-${hour}`,
+          label: String(hour).padStart(2, '0'),
+          count: 0
+        }))
+        events.forEach((row) => {
+          const d = new Date(normalizeTs(row.ts))
+          if (Number.isNaN(d.getTime())) return
+          buckets[d.getHours()].count += 1
+        })
+        return buckets
+      }
+
+      if (periodType === 'month') {
+        const [year, month] = periodMonth.split('-').map(Number)
+        const daysInMonth = new Date(year, month || 1, 0).getDate()
+        const buckets = Array.from({ length: daysInMonth }, (_, index) => ({
+          key: `${equipmentId}-d-${index + 1}`,
+          label: String(index + 1).padStart(2, '0'),
+          count: 0
+        }))
+        events.forEach((row) => {
+          const d = new Date(normalizeTs(row.ts))
+          if (Number.isNaN(d.getTime())) return
+          const day = d.getDate()
+          if (day >= 1 && day <= daysInMonth) buckets[day - 1].count += 1
+        })
+        return buckets
+      }
+
+      const buckets = Array.from({ length: 12 }, (_, index) => ({
+        key: `${equipmentId}-m-${index + 1}`,
+        label: monthLabelRu(index),
+        count: 0
+      }))
+      events.forEach((row) => {
+        const d = new Date(normalizeTs(row.ts))
+        if (Number.isNaN(d.getTime())) return
+        buckets[d.getMonth()].count += 1
+      })
+      return buckets
+    })()
+
+    return {
+      equipmentId,
+      name: meta.name || equipmentId,
+      type: meta.type || '—',
+      protocol: meta.protocol || '—',
+      live,
+      currentStatus,
+      eventsCount: events.length,
+      alarmCount,
+      runMinutes: runMinutesLocal,
+      analyticsDowntimeMinutes,
+      offlineMinutes,
+      availability,
+      dominantStatus: dominant,
+      lastEvent,
+      statusRows,
+      visibleStatusRows: excludeOfflineMinutes(statusRows),
+      periodBuckets
+    }
+  }), [stationOptions, equipmentMetaById, periodEvents, periodIntervals, liveById, stateById, periodBounds.startMs, periodBounds.endMs, periodType, periodMonth])
+  const stationPeriodChartTitle = periodType === 'day'
+    ? 'События по часам'
+    : periodType === 'month'
+      ? 'События по дням месяца'
+      : 'События по месяцам'
+  const peakActivityBucket = [...activityChart.buckets].sort((a, b) => b.count - a.count)[0]
+  const headlineDowntimeLeader = topByDowntime[0]
+  const headlineEventsLeader = topByEvents[0]
 
   return (
     <section className="table-card">
-      <h2>{`Отчеты за ${periodLabel}`}</h2>
+      <div className="hero-panel report-hero-panel">
+        <div>
+          <div className="hero-eyebrow">Периодическая отчетность</div>
+          <h2>{`Отчеты за ${periodLabel}`}</h2>
+          <p className="hero-copy">Агрегированная аналитика по событиям, времени работы, простоям и динамике каждого станка в выбранном периоде.</p>
+        </div>
+        <div className="hero-chips">
+          <div className="hero-chip">
+            <span>Доступность</span>
+            <strong>{formatPct(availabilityPct)}</strong>
+          </div>
+          <div className="hero-chip">
+            <span>Лидер по событиям</span>
+            <strong>{headlineEventsLeader ? headlineEventsLeader.id : '—'}</strong>
+          </div>
+          <div className="hero-chip">
+            <span>Макс. простой</span>
+            <strong>{headlineDowntimeLeader ? headlineDowntimeLeader.id : '—'}</strong>
+          </div>
+        </div>
+      </div>
       <div className="reports-toolbar">
         <select value={periodType} onChange={(e) => setPeriodType(e.target.value)}>
           <option value="day">По дню</option>
@@ -1127,46 +1727,24 @@ function ReportsPage({ data, alarmsCount, selectedDay }) {
         <div className="kpi-card"><div className="kpi-label">Кол-во простоев</div><div className="kpi-value">{totalDowntimeCount}</div></div>
       </div>
       <div className="charts-grid">
-        <MinutesDonut title="Анализ времени работы и простоев" rows={statusMinutes} />
-        <div className="chart-card">
-          <h3>Простои по оборудованию (мин)</h3>
+        <MinutesDonut title="Анализ времени работы и простоев" rows={excludeOfflineMinutes(statusMinutes)} />
+        <TimeBarsCard title={activityChart.title} subtitle={peakActivityBucket?.count ? `Пиковый интервал: ${peakActivityBucket.label}` : 'Активность за период'} buckets={activityChart.buckets} />
+        <StatusSegmentsCard title="Структура периода" subtitle="Сколько времени система находилась в каждом прикладном состоянии" rows={excludeOfflineMinutes(statusMinutes)} />
+      </div>
+      <div className="charts-grid">
+        <div className="chart-card chart-card-rich">
+          <h3>Простои по оборудованию</h3>
           <div className="bars">
             {topByDowntime.map((x) => (
               <div key={x.id} className="bar-row">
                 <div className="bar-label">{x.id}</div>
                 <div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(4, (x.mins / (topByDowntime[0]?.mins || 1)) * 100)}%` }} /></div>
-                <div className="bar-val">{x.mins}</div>
+                <div className="bar-val">{formatMinutesRu(x.mins)}</div>
               </div>
             ))}
           </div>
         </div>
-      </div>
-      <div className="chart-card">
-        <h3>Диаграмма по станку</h3>
-        <div className="reports-toolbar">
-          <select value={stationId} onChange={(e) => setStationId(e.target.value)}>
-            <option value="">Выберите станок</option>
-            {stationOptions.map((id) => <option key={id} value={id}>{id}</option>)}
-          </select>
-        </div>
-        {stationId
-          ? <MinutesDonut title={`Статусы по времени: ${stationId}`} rows={stationStatusMinutes} />
-          : <div className="sub">Выберите станок для отображения круговой диаграммы.</div>}
-      </div>
-      <div className="charts-grid">
-        <div className="chart-card">
-          <h3>Пиковые часы активности</h3>
-          <div className="bars">
-            {hourly.map((x) => (
-              <div key={x.hour} className="bar-row">
-                <div className="bar-label">{String(x.hour).padStart(2, '0')}:00</div>
-                <div className="bar-track"><div className="bar-fill" style={{ width: `${Math.max(4, (x.count / maxHourly) * 100)}%` }} /></div>
-                <div className="bar-val">{x.count}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="chart-card">
+        <div className="chart-card chart-card-rich">
           <h3>Топ оборудования по событиям</h3>
           <div className="bars">
             {topByEvents.map((x) => (
@@ -1179,13 +1757,96 @@ function ReportsPage({ data, alarmsCount, selectedDay }) {
           </div>
         </div>
       </div>
-      <div className="grid-cards">
-        {data.reports.map((x) => (
-          <article key={x.equipment_id} className="report-card">
-            <div className="equip-title">{x.name || x.equipment_id}</div>
-            <div className="sub">{x.equipment_id} · {x.type} · {x.protocol}</div>
-          </article>
-        ))}
+      <div className="chart-card chart-card-rich">
+        <div className="chart-head">
+          <div>
+            <h3>Фокус по одному станку</h3>
+            <div className="sub">Быстрый просмотр распределения времени для выбранного оборудования.</div>
+          </div>
+        </div>
+        <div className="reports-toolbar reports-toolbar-compact">
+          <select value={stationId} onChange={(e) => setStationId(e.target.value)}>
+            <option value="">Выберите станок</option>
+            {stationOptions.map((id) => <option key={id} value={id}>{id}</option>)}
+          </select>
+        </div>
+        {stationId
+          ? <MinutesDonut title={`Статусы по времени: ${stationId}`} rows={excludeOfflineMinutes(stationStatusMinutes)} />
+          : <div className="sub">Выберите станок для отображения круговой диаграммы.</div>}
+      </div>
+      <div className="chart-card station-reports-card">
+        <div className="station-reports-head">
+          <div>
+            <h3>Отчеты по станкам</h3>
+            <div className="sub">Карточки строятся автоматически для всего оборудования, которое есть в системе. Новые станки появятся здесь без дополнительной настройки.</div>
+          </div>
+          <div className="tag">{stationReports.length} станков в отчете</div>
+        </div>
+        <div className="station-report-grid">
+          {stationReports.map((station) => {
+            const liveTone = station.live === 'ONLINE' ? 'run' : station.live === 'STALE' ? 'offline' : 'idle'
+            const statusToneName = ['RUN', 'STOP', 'ALARM', 'OFFLINE', 'IDLE'].includes(station.currentStatus)
+              ? statusTone(station.currentStatus).replace('status ', '')
+              : 'idle'
+            return (
+              <article key={station.equipmentId} className="station-report-card">
+                <div className="station-report-head">
+                  <div>
+                    <div className="equip-title">{station.name}</div>
+                    <div className="sub">{station.equipmentId}</div>
+                  </div>
+                  <span className={`status ${liveTone}`}>{station.live === 'ONLINE' ? 'В СЕТИ' : station.live === 'STALE' ? 'НЕТ НОВЫХ ДАННЫХ' : 'НЕТ ДАННЫХ'}</span>
+                </div>
+                <div className="equipment-tags">
+                  <span className="tag">{station.type}</span>
+                  <span className="tag">{station.protocol}</span>
+                  <span className={`status ${statusToneName}`}>{statusLabel(station.currentStatus)}</span>
+                  <span className="tag">Доминирует: {statusLabel(station.dominantStatus)}</span>
+                </div>
+                <div className="station-kpi-grid">
+                  <div className="station-kpi">
+                    <div className="kpi-label">События</div>
+                    <div className="station-kpi-value">{station.eventsCount}</div>
+                  </div>
+                  <div className="station-kpi">
+                    <div className="kpi-label">ALARM</div>
+                    <div className="station-kpi-value">{station.alarmCount}</div>
+                  </div>
+                  <div className="station-kpi">
+                    <div className="kpi-label">Простой</div>
+                    <div className="station-kpi-value">{formatMinutesRu(station.analyticsDowntimeMinutes)}</div>
+                  </div>
+                  <div className="station-kpi">
+                    <div className="kpi-label">Доступность</div>
+                    <div className="station-kpi-value">{formatPct(station.availability)}</div>
+                  </div>
+                </div>
+                <div className="station-report-main">
+                  <div className="station-donut-card">
+                    {station.visibleStatusRows.length
+                      ? <MinutesDonut title={`Статусы: ${station.equipmentId}`} rows={station.visibleStatusRows} />
+                      : <div className="station-empty">За выбранный период по станку пока нет интервалов.</div>}
+                  </div>
+                  <div className="station-side-panel">
+                    <div className="report-note">
+                      <div className="kpi-label">Последнее событие</div>
+                      <div>{station.lastEvent ? formatTs(station.lastEvent) : 'Нет событий за период'}</div>
+                    </div>
+                    <StationPeriodChart title={stationPeriodChartTitle} buckets={station.periodBuckets} />
+                    <div className="report-note">
+                      <div className="kpi-label">Структура времени</div>
+                      <TopStatusList rows={station.visibleStatusRows} />
+                    </div>
+                  </div>
+                </div>
+                <div className="btn-row">
+                  <Link className="ghost" to={`/events-log?equipment=${encodeURIComponent(station.equipmentId)}`}>События станка</Link>
+                  <Link className="ghost" to={`/downtime-log?equipment=${encodeURIComponent(station.equipmentId)}`}>Простои станка</Link>
+                </div>
+              </article>
+            )
+          })}
+        </div>
       </div>
     </section>
   )
@@ -1200,7 +1861,7 @@ function AdminPage() {
   const [notice, setNotice] = useState('')
   const [forceRunId, setForceRunId] = useState('')
   const [forceRunBusy, setForceRunBusy] = useState(false)
-  const [userForm, setUserForm] = useState({ username: '', password: '', role: 'operator' })
+  const [userForm, setUserForm] = useState({ username: '', password: '', role: 'operator', full_name: '' })
   const [roleForm, setRoleForm] = useState({ name: '', description: '', permissions: [] })
   const [editRoleName, setEditRoleName] = useState('')
   const [editRoleForm, setEditRoleForm] = useState({ description: '', permissions: [] })
@@ -1311,6 +1972,7 @@ function AdminPage() {
         poll_interval_sec: 2,
         timeout_sec: 60
       })
+      await loadAdminData()
     } catch (err) {
       setError(`Ошибка добавления оборудования: ${String(err.message || err)}`)
     }
@@ -1347,10 +2009,11 @@ function AdminPage() {
       await api.createUser({
         username: userForm.username.trim(),
         password: userForm.password,
-        role: userForm.role
+        role: userForm.role,
+        full_name: userForm.full_name.trim()
       })
       setNotice(`Пользователь создан: ${userForm.username}`)
-      setUserForm({ username: '', password: '', role: 'operator' })
+      setUserForm({ username: '', password: '', role: 'operator', full_name: '' })
       await loadAdminData()
     } catch (err) {
       setError(`Ошибка создания пользователя: ${String(err.message || err)}`)
@@ -1428,6 +2091,7 @@ function AdminPage() {
         <form className="chart-card" onSubmit={createUser}>
           <h3>Создать пользователя</h3>
           <label>Логин<input value={userForm.username} onChange={(e) => setUserForm({ ...userForm, username: e.target.value })} /></label>
+          <label>ФИО<input value={userForm.full_name} onChange={(e) => setUserForm({ ...userForm, full_name: e.target.value })} /></label>
           <label>Пароль<input type="password" value={userForm.password} onChange={(e) => setUserForm({ ...userForm, password: e.target.value })} /></label>
           <label>Роль
             <select value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}>
@@ -1438,7 +2102,7 @@ function AdminPage() {
         </form>
         <form className="chart-card" onSubmit={createEquipment}>
           <h3>Добавить оборудование</h3>
-          <label>ИД<input value={equipmentForm.equipment_id} onChange={(e) => setEquipmentForm({ ...equipmentForm, equipment_id: e.target.value })} /></label>
+          <label>ID<input value={equipmentForm.equipment_id} onChange={(e) => setEquipmentForm({ ...equipmentForm, equipment_id: e.target.value })} /></label>
           <label>Имя<input value={equipmentForm.name} onChange={(e) => setEquipmentForm({ ...equipmentForm, name: e.target.value })} /></label>
           <label>Тип
             <select value={equipmentForm.type} onChange={(e) => setEquipmentForm({ ...equipmentForm, type: e.target.value })}>
@@ -1519,10 +2183,10 @@ function AdminPage() {
               ))}
             </div>
           </label>
-          {['admin', 'operator'].includes(editRoleName) && <div className="sub">Системные роли нельзя изменять или удалять.</div>}
+          {BUILTIN_ROLES.includes(editRoleName) && <div className="sub">Системные роли нельзя изменять или удалять.</div>}
           <div className="btn-row">
-            <button className="primary" type="submit" disabled={!editRoleName || ['admin', 'operator'].includes(editRoleName)}>Сохранить изменения</button>
-            <button className="ghost" type="button" disabled={!editRoleName || ['admin', 'operator'].includes(editRoleName)} onClick={() => deleteRole(editRoleName)}>Удалить роль</button>
+            <button className="primary" type="submit" disabled={!editRoleName || BUILTIN_ROLES.includes(editRoleName)}>Сохранить изменения</button>
+            <button className="ghost" type="button" disabled={!editRoleName || BUILTIN_ROLES.includes(editRoleName)} onClick={() => deleteRole(editRoleName)}>Удалить роль</button>
           </div>
         </form>
       </div>

@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   nginx:
     image: nginx:1.27-alpine
@@ -8,18 +6,36 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      - events_api
-      - auth_api
-      - admin_api
-      - reports_api
-      - downtime_service
-      - frontend
+      events_api:
+        condition: service_healthy
+      auth_api:
+        condition: service_healthy
+      admin_api:
+        condition: service_healthy
+      reports_api:
+        condition: service_healthy
+      downtime_service:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   rabbitmq:
     image: rabbitmq:3.13-management
     ports:
       - "${RABBITMQ_AMQP_PORT}:5672"
       - "${RABBITMQ_UI_PORT}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   mosquitto:
     image: eclipse-mosquitto:2
@@ -36,6 +52,14 @@ services:
       POSTGRES_DB: ${POSTGRES_EVENTS_DB}
     ports:
       - "${POSTGRES_EVENTS_PORT}:5432"
+    volumes:
+      - postgres_events_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_EVENTS_USER} -d ${POSTGRES_EVENTS_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   postgres_admin:
     image: postgres:16-alpine
@@ -45,6 +69,14 @@ services:
       POSTGRES_DB: ${POSTGRES_ADMIN_DB}
     ports:
       - "${POSTGRES_ADMIN_PORT}:5432"
+    volumes:
+      - postgres_admin_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_ADMIN_USER} -d ${POSTGRES_ADMIN_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   postgres_downtime:
     image: postgres:16-alpine
@@ -54,11 +86,25 @@ services:
       POSTGRES_DB: ${POSTGRES_DOWNTIME_DB}
     ports:
       - "${POSTGRES_DOWNTIME_PORT}:5432"
+    volumes:
+      - postgres_downtime_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_DOWNTIME_USER} -d ${POSTGRES_DOWNTIME_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   redis_auth:
     image: redis:7-alpine
     ports:
       - "${REDIS_PORT}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
   events_api:
     build: ./events_api
@@ -68,8 +114,16 @@ services:
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
       AUTH_DISABLED: "${AUTH_DISABLED}"
     depends_on:
-      - postgres_events
-      - rabbitmq
+      postgres_events:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
 
   event_writer:
     build: ./event_writer
@@ -77,19 +131,22 @@ services:
       DATABASE_URL: ${EVENT_WRITER_DATABASE_URL}
       RABBIT_URL: ${RABBIT_URL}
     depends_on:
-      - postgres_events
-      - rabbitmq
+      postgres_events:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
   telegram_notifier:
     build: ./telegram_notifier
     environment:
       RABBIT_URL: ${RABBIT_URL}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
-      TELEGRAM_ALERT_STATUSES: ${TELEGRAM_ALERT_STATUSES}
-      TELEGRAM_QUEUE_NAME: ${TELEGRAM_QUEUE_NAME}
+      TELEGRAM_BOT_TOKEN: ${ASMON_TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${ASMON_TELEGRAM_CHAT_ID}
+      TELEGRAM_ALERT_STATUSES: ${ASMON_TELEGRAM_ALERT_STATUSES}
+      TELEGRAM_QUEUE_NAME: ${ASMON_TELEGRAM_QUEUE_NAME}
     depends_on:
-      - rabbitmq
+      rabbitmq:
+        condition: service_healthy
 
   downtime_service:
     build: ./downtime_service
@@ -102,10 +159,20 @@ services:
       AUTH_DISABLED: "${AUTH_DISABLED}"
       ENABLE_OFFLINE_CHECK: "${ENABLE_OFFLINE_CHECK}"
     depends_on:
-      - postgres_events
-      - postgres_admin
-      - postgres_downtime
-      - rabbitmq
+      postgres_events:
+        condition: service_healthy
+      postgres_admin:
+        condition: service_healthy
+      postgres_downtime:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
 
   downtime_worker:
     build: ./downtime_service
@@ -119,7 +186,10 @@ services:
       AUTH_DISABLED: "${AUTH_DISABLED}"
       ENABLE_OFFLINE_CHECK: "${ENABLE_OFFLINE_CHECK}"
     depends_on:
-      - downtime_service
+      downtime_service:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
   availability_beat:
     build: ./downtime_service
@@ -131,7 +201,10 @@ services:
       RABBIT_URL: ${RABBIT_URL}
       ENABLE_OFFLINE_CHECK: "${ENABLE_OFFLINE_CHECK}"
     depends_on:
-      - downtime_service
+      downtime_service:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
   auth_api:
     build: ./auth_service
@@ -141,7 +214,14 @@ services:
       AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE}
       REDIS_URL: ${REDIS_URL}
     depends_on:
-      - redis_auth
+      redis_auth:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
 
   reports_api:
     build: ./reports_service
@@ -152,9 +232,20 @@ services:
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
       AUTH_DISABLED: "${AUTH_DISABLED}"
     depends_on:
-      - postgres_events
-      - postgres_admin
-      - postgres_downtime
+      postgres_events:
+        condition: service_healthy
+      postgres_admin:
+        condition: service_healthy
+      postgres_downtime:
+        condition: service_healthy
+      downtime_service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
 
   admin_api:
     build: ./admin_service
@@ -166,12 +257,21 @@ services:
       DOWNTIME_DB_URL: ${ADMIN_DOWNTIME_DB_URL}
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
       AUTH_DISABLED: "${AUTH_DISABLED}"
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      TELEGRAM_BOT_TOKEN: ${ASMON_TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${ASMON_TELEGRAM_CHAT_ID}
     depends_on:
-      - postgres_admin
-      - postgres_events
-      - postgres_downtime
+      postgres_admin:
+        condition: service_healthy
+      postgres_events:
+        condition: service_healthy
+      postgres_downtime:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/').status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   nodered:
     image: nodered/node-red:3.1
@@ -180,8 +280,10 @@ services:
     volumes:
       - ./nodered/flows.json:/data/flows.json:ro
     depends_on:
-      - nginx
-      - mosquitto
+      nginx:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
 
   simulator_service:
     build: ./simulator_service
@@ -192,8 +294,10 @@ services:
       POLL_INTERVAL_SEC: ${SIMULATOR_POLL_INTERVAL_SEC}
       REQUEST_TIMEOUT_SEC: ${SIMULATOR_REQUEST_TIMEOUT_SEC}
     depends_on:
-      - nginx
-      - mosquitto
+      nginx:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
 
   frontend:
     build: ./frontend
@@ -201,4 +305,16 @@ services:
       VITE_API_PROXY_TARGET: ${VITE_API_PROXY_TARGET}
     ports:
       - "${FRONTEND_PORT}:5173"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
+volumes:
+  postgres_events_data:
+  postgres_admin_data:
+  postgres_downtime_data:
+  rabbitmq-data:
+  redis-data:
